@@ -1,11 +1,20 @@
 import {
 	CopyObjectCommand,
 	DeleteObjectCommand,
+	GetObjectCommand,
+	ListObjectsV2Command,
 	PutObjectCommand,
 	type S3Client,
 } from '@aws-sdk/client-s3';
 import type { S3BackupSettings } from '../settings';
+import { isSystemObjectKey } from '../sync/paths';
 import { createS3Client } from './client';
+
+export interface CloudObject {
+	key: string;
+	etag: string;
+	size: number;
+}
 
 export class S3StorageService {
 	private readonly client: S3Client;
@@ -14,6 +23,53 @@ export class S3StorageService {
 	constructor(settings: S3BackupSettings) {
 		this.client = createS3Client(settings);
 		this.bucket = settings.bucket.trim();
+	}
+
+	async listVaultObjects(): Promise<CloudObject[]> {
+		const objects: CloudObject[] = [];
+		let continuationToken: string | undefined;
+
+		do {
+			const response = await this.client.send(
+				new ListObjectsV2Command({
+					Bucket: this.bucket,
+					ContinuationToken: continuationToken,
+				}),
+			);
+
+			for (const item of response.Contents ?? []) {
+				if (!item.Key || isSystemObjectKey(item.Key)) {
+					continue;
+				}
+				objects.push({
+					key: item.Key,
+					etag: item.ETag ?? '',
+					size: item.Size ?? 0,
+				});
+			}
+
+			continuationToken = response.IsTruncated
+				? response.NextContinuationToken
+				: undefined;
+		} while (continuationToken);
+
+		return objects;
+	}
+
+	async download(key: string): Promise<ArrayBuffer> {
+		const response = await this.client.send(
+			new GetObjectCommand({
+				Bucket: this.bucket,
+				Key: key,
+			}),
+		);
+
+		if (!response.Body) {
+			throw new Error('Empty object body.');
+		}
+
+		const bytes = await response.Body.transformToByteArray();
+		return copyArrayBufferView(bytes);
 	}
 
 	async upload(
@@ -63,4 +119,10 @@ function encodeCopySource(bucket: string, key: string): string {
 		.map((segment) => encodeURIComponent(segment))
 		.join('/');
 	return `${encodedBucket}/${encodedKey}`;
+}
+
+function copyArrayBufferView(view: ArrayBufferView): ArrayBuffer {
+	const copy = new Uint8Array(view.byteLength);
+	copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+	return copy.buffer;
 }

@@ -1,7 +1,7 @@
 import type { DataAdapter } from 'obsidian';
 import { normalizePath } from 'obsidian';
 
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 
 export interface FileRecord {
 	path: string;
@@ -10,28 +10,44 @@ export interface FileRecord {
 	md5: string;
 }
 
-export interface PendingDelete {
-	path: string;
-	wasteKey: string;
-	deletedAt: number;
-	copyCompleted: boolean;
-	lastError?: string;
-}
-
 export interface MetadataDatabase {
 	version: number;
-	files: Record<string, FileRecord>;
-	pending_deletes: PendingDelete[];
+	last_sync_time: number;
 	last_backup_time: number;
+	files: Record<string, FileRecord>;
+	pending_deletes: string[];
 }
 
 function createEmptyDatabase(): MetadataDatabase {
 	return {
 		version: DATABASE_VERSION,
+		last_sync_time: 0,
+		last_backup_time: 0,
 		files: {},
 		pending_deletes: [],
-		last_backup_time: 0,
 	};
+}
+
+function normalizePendingDeletes(raw: unknown): string[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	return raw
+		.map((item) => {
+			if (typeof item === 'string') {
+				return item;
+			}
+			if (
+				typeof item === 'object' &&
+				item !== null &&
+				'path' in item &&
+				typeof (item as { path: unknown }).path === 'string'
+			) {
+				return (item as { path: string }).path;
+			}
+			return null;
+		})
+		.filter((path): path is string => Boolean(path));
 }
 
 export class MetadataStore {
@@ -68,9 +84,10 @@ export class MetadataStore {
 		const parsed = JSON.parse(raw) as Partial<MetadataDatabase>;
 		this.data = {
 			version: DATABASE_VERSION,
-			files: parsed.files ?? {},
-			pending_deletes: parsed.pending_deletes ?? [],
+			last_sync_time: parsed.last_sync_time ?? 0,
 			last_backup_time: parsed.last_backup_time ?? 0,
+			files: parsed.files ?? {},
+			pending_deletes: normalizePendingDeletes(parsed.pending_deletes),
 		};
 	}
 
