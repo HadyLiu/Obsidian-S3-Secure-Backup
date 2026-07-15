@@ -1,0 +1,28 @@
+.s3-backup-notice--success {
+	color: var(--color-green);
+}
+
+.s3-backup-notice--error {
+	color: var(--color-red);
+}
+
+.s3-backup-security-warning {
+	margin-top: 1.5em;
+	padding: 0.75em 1em;
+	border-left: 3px solid var(--color-orange);
+	background-color: var(--background-modifier-hover);
+	border-radius: 4px;
+}
+
+.s3-backup-security-warning p {
+	margin: 0.5em 0;
+}
+
+.s3-backup-security-warning code {
+	display: block;
+	margin-top: 0.5em;
+	padding: 0.4em 0.6em;
+	background-color: var(--background-primary);
+	border-radius: 4px;
+	font-family: var(--font-monospace);
+}
