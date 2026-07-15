@@ -1,4 +1,5 @@
 import { Notice, Plugin } from 'obsidian';
+import { BackupEngine, type BackupResult } from './backup/backup-engine';
 import { MetadataStore } from './database/metadata-store';
 import {
 	DEFAULT_BACKUP_EXPORT_PATH,
@@ -13,6 +14,7 @@ export default class S3SecureBackupPlugin extends Plugin {
 	settings!: S3BackupSettings;
 	private metadataStore!: MetadataStore;
 	private syncEngine!: SyncEngine;
+	private backupEngine!: BackupEngine;
 	private syncIntervalId: number | null = null;
 	private scheduledIntervalSeconds = 0;
 
@@ -31,6 +33,11 @@ export default class S3SecureBackupPlugin extends Plugin {
 			this.metadataStore,
 			() => this.settings,
 		);
+		this.backupEngine = new BackupEngine(
+			this.app.vault,
+			this.metadataStore,
+			() => this.settings,
+		);
 
 		this.addSettingTab(new S3BackupSettingTab(this.app, this));
 		this.addCommand({
@@ -40,11 +47,18 @@ export default class S3SecureBackupPlugin extends Plugin {
 				void this.runManualSync();
 			},
 		});
+		this.addCommand({
+			id: 'daily-backup-now',
+			name: 'Run daily diff backup now',
+			callback: () => {
+				void this.runManualDailyBackup();
+			},
+		});
 
 		this.refreshSyncTimer();
 		this.register(() => this.stopSyncTimer());
 		this.app.workspace.onLayoutReady(() => {
-			void this.runBackgroundSync();
+			void this.runStartupTasks();
 		});
 	}
 
@@ -85,6 +99,52 @@ export default class S3SecureBackupPlugin extends Plugin {
 		if (this.syncIntervalId !== null) {
 			window.clearInterval(this.syncIntervalId);
 			this.syncIntervalId = null;
+		}
+	}
+
+	private async runStartupTasks(): Promise<void> {
+		if (!hasCompleteConnectionSettings(this.settings)) {
+			return;
+		}
+
+		await this.runBackgroundSync();
+		await this.runDailyBackupIfDue();
+	}
+
+	private async runManualDailyBackup(): Promise<void> {
+		try {
+			const result = await this.backupEngine.run();
+			if (result.errors.length > 0) {
+				console.error('S3 daily backup errors:', result.errors);
+			}
+			new Notice(
+				formatBackupResult(result),
+				result.errors.length > 0 ? 12000 : 5000,
+			);
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : 'Unknown backup error.';
+			console.error('S3 daily backup failed:', error);
+			new Notice(`S3 daily backup failed: ${message}`, 8000);
+		}
+	}
+
+	private async runDailyBackupIfDue(): Promise<void> {
+		if (this.backupEngine.isRunning || this.syncEngine.isRunning) {
+			return;
+		}
+
+		try {
+			const result = await this.backupEngine.runIfDue();
+			if (!result) {
+				return;
+			}
+			if (result.errors.length > 0) {
+				console.error('S3 daily backup completed with errors:', result.errors);
+				return;
+			}
+		} catch (error) {
+			console.error('S3 daily backup failed:', error);
 		}
 	}
 
@@ -129,6 +189,18 @@ function hasCompleteConnectionSettings(settings: S3BackupSettings): boolean {
 			settings.accessKeyId.trim() &&
 			settings.secretAccessKey.trim(),
 	);
+}
+
+function formatBackupResult(result: BackupResult): string {
+	const summary =
+		`Daily backup complete: ${result.backedUp} file(s) uploaded, ` +
+		`${result.skipped} skipped.`;
+	if (result.errors.length === 0) {
+		return summary;
+	}
+
+	const firstError = result.errors[0] ?? 'Unknown error';
+	return `${summary} ${result.errors.length} error(s). First error: ${firstError}`;
 }
 
 function formatSyncResult(result: SyncResult): string {
