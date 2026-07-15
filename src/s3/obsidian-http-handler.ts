@@ -48,15 +48,14 @@ export class ObsidianHttpHandler {
 			throw: false,
 		});
 
-		// Must be Uint8Array (not ArrayBuffer).
-		// S3 throw200ExceptionsMiddleware short-circuits on Uint8Array;
-		// ArrayBuffer falls through to streamCollector and throws
-		// "stream.getReader is not a function".
+		// Must be ReadableStream (or Blob), not Uint8Array/ArrayBuffer.
+		// - GetObject deserializer expects Blob/ReadableStream (sdk-stream-mixin).
+		// - throw200ExceptionsMiddleware can collect via streamCollector.getReader().
 		return {
 			response: {
 				statusCode: result.status,
 				headers: normalizeResponseHeaders(result.headers),
-				body: new Uint8Array(result.arrayBuffer),
+				body: arrayBufferToReadableStream(result.arrayBuffer),
 			},
 		};
 	}
@@ -235,4 +234,15 @@ async function readableStreamToArrayBuffer(
 		offset += chunk.byteLength;
 	}
 	return merged.buffer;
+}
+
+function arrayBufferToReadableStream(
+	buffer: ArrayBuffer,
+): ReadableStream<Uint8Array> {
+	return new ReadableStream({
+		start(controller) {
+			controller.enqueue(new Uint8Array(buffer));
+			controller.close();
+		},
+	});
 }
