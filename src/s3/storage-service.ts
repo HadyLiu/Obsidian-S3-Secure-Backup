@@ -70,7 +70,11 @@ export class S3StorageService {
 			);
 
 			for (const item of response.Contents ?? []) {
-				if (!item.Key || isSystemObjectKey(item.Key)) {
+				if (
+					!item.Key ||
+					item.Key.endsWith('/') ||
+					isSystemObjectKey(item.Key)
+				) {
 					continue;
 				}
 				objects.push({

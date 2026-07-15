@@ -44,8 +44,14 @@ export default class S3SecureBackupPlugin extends Plugin {
 			this.metadataStore,
 			() => this.settings,
 		);
-		this.trashService = new TrashService(this.app.vault, () => this.settings);
+		this.trashService = new TrashService(
+			this.app,
+			this.app.vault,
+			this.app.vault.configDir,
+			() => this.settings,
+		);
 		this.backupExportService = new BackupExportService(
+			this.app,
 			this.app.vault,
 			() => this.settings,
 		);
@@ -189,18 +195,18 @@ export default class S3SecureBackupPlugin extends Plugin {
 		try {
 			const result = await this.backupEngine.run();
 			if (result.errors.length > 0) {
-				console.error('S3 daily backup errors:', result.errors);
+				console.error(
+					`S3 daily backup completed with ${result.errors.length} error(s).`,
+				);
 			}
 			new Notice(
 				formatBackupResult(result),
 				result.errors.length > 0 ? 12000 : 5000,
 			);
 			await this.refreshManagerView();
-		} catch (error) {
-			const message =
-				error instanceof Error ? error.message : 'Unknown backup error.';
-			console.error('S3 daily backup failed:', error);
-			new Notice(`S3 daily backup failed: ${message}`, 8000);
+		} catch {
+			console.error('S3 daily backup failed.');
+			new Notice('S3 daily backup failed. Check settings and permissions.', 8000);
 		}
 	}
 
@@ -215,12 +221,14 @@ export default class S3SecureBackupPlugin extends Plugin {
 				return;
 			}
 			if (result.errors.length > 0) {
-				console.error('S3 daily backup completed with errors:', result.errors);
+				console.error(
+					`S3 daily backup completed with ${result.errors.length} error(s).`,
+				);
 				return;
 			}
 			await this.refreshManagerView();
-		} catch (error) {
-			console.error('S3 daily backup failed:', error);
+		} catch {
+			console.error('S3 daily backup failed.');
 		}
 	}
 
@@ -228,18 +236,18 @@ export default class S3SecureBackupPlugin extends Plugin {
 		try {
 			const result = await this.syncEngine.sync();
 			if (result.errors.length > 0) {
-				console.error('S3 backup errors:', result.errors);
+				console.error(
+					`S3 backup completed with ${result.errors.length} error(s).`,
+				);
 			}
 			new Notice(
 				formatSyncResult(result),
 				result.errors.length > 0 ? 12000 : 5000,
 			);
 			await this.refreshManagerView();
-		} catch (error) {
-			const message =
-				error instanceof Error ? error.message : 'Unknown sync error.';
-			console.error('S3 backup failed:', error);
-			new Notice(`S3 backup failed: ${message}`, 8000);
+		} catch {
+			console.error('S3 backup failed.');
+			new Notice('S3 backup failed. Check settings and permissions.', 8000);
 		}
 	}
 
@@ -251,10 +259,12 @@ export default class S3SecureBackupPlugin extends Plugin {
 		try {
 			const result = await this.syncEngine.sync();
 			if (result.errors.length > 0) {
-				console.error('S3 backup completed with errors:', result.errors);
+				console.error(
+					`S3 backup completed with ${result.errors.length} error(s).`,
+				);
 			}
-		} catch (error) {
-			console.error('S3 background backup failed:', error);
+		} catch {
+			console.error('S3 background backup failed.');
 		}
 	}
 }
@@ -276,8 +286,7 @@ function formatBackupResult(result: BackupResult): string {
 		return summary;
 	}
 
-	const firstError = result.errors[0] ?? 'Unknown error';
-	return `${summary} ${result.errors.length} error(s). First error: ${firstError}`;
+	return `${summary} ${result.errors.length} error(s).`;
 }
 
 function formatSyncResult(result: SyncResult): string {
@@ -290,10 +299,8 @@ function formatSyncResult(result: SyncResult): string {
 		return summary;
 	}
 
-	const firstError = result.errors[0] ?? 'Unknown error';
 	return (
 		`${summary} ${result.errors.length} error(s); ` +
-		`${result.pendingDeletes} deletion(s) pending retry. ` +
-		`First error: ${firstError}`
+		`${result.pendingDeletes} deletion(s) pending retry.`
 	);
 }

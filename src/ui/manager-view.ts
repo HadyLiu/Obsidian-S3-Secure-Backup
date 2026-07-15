@@ -1,4 +1,5 @@
 import { ItemView, Notice, Setting, type WorkspaceLeaf } from 'obsidian';
+import { formatS3Error } from '../s3/client';
 import type { BackupExportService, BackupPackage } from '../services/backup-export-service';
 import type { TrashService } from '../services/trash-service';
 import type { TrashFolderNode, TrashItem } from '../services/trash-tree';
@@ -76,10 +77,8 @@ export class BackupManagerView extends ItemView {
 			this.packages = await this.backupExportService.listRecentPackages(7);
 			this.statusText = 'Ready';
 		} catch (error) {
-			const message =
-				error instanceof Error ? error.message : 'Failed to load manager data.';
-			this.statusText = message;
-			console.error('S3 manager refresh failed:', error);
+			this.statusText = `Failed to load manager data: ${formatS3Error(error)}`;
+			console.error('S3 manager refresh failed.');
 		} finally {
 			this.loading = false;
 			this.render();
@@ -221,8 +220,8 @@ export class BackupManagerView extends ItemView {
 		try {
 			this.packages = await this.backupExportService.listRecentPackages(7);
 			this.render();
-		} catch (error) {
-			console.error('S3 backup package refresh failed:', error);
+		} catch {
+			console.error('S3 backup package refresh failed.');
 		}
 	}
 

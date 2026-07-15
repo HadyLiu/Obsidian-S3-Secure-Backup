@@ -3,7 +3,7 @@
 	"name": "S3 Secure Backup",
 	"version": "0.1.0",
 	"minAppVersion": "1.7.2",
-	"description": "One-way encrypted backup from Obsidian vault to S3-compatible storage with trash and daily diff recovery.",
+	"description": "Bidirectional S3-compatible sync with trash and daily diff recovery.",
 	"author": "",
 	"isDesktopOnly": false
 }

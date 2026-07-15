@@ -1,5 +1,9 @@
-import { normalizePath, type Vault } from 'obsidian';
+import type { App, Vault } from 'obsidian';
 import JSZip from 'jszip';
+import {
+	joinSafeVaultPath,
+	validateVaultRelativePath,
+} from '../security/validation';
 import type { S3BackupSettings } from '../settings';
 import { formatS3Error } from '../s3/client';
 import { S3StorageService } from '../s3/storage-service';
@@ -19,6 +23,7 @@ export interface ExportProgress {
 
 export class BackupExportService {
 	constructor(
+		private readonly app: App,
 		private readonly vault: Vault,
 		private readonly getSettings: () => S3BackupSettings,
 	) {}
@@ -79,6 +84,9 @@ export class BackupExportService {
 		try {
 			const files: Array<{ zipPath: string; key: string }> = [];
 			for (const dateKey of selectedDateKeys) {
+				if (!/^\d{8}$/.test(dateKey)) {
+					throw new Error('Invalid backup date identifier.');
+				}
 				const prefix = `.Backup/${bucket}/${dateKey}_backup/`;
 				const objects = await storage.listObjectsByPrefix(prefix);
 				for (const object of objects) {
@@ -86,8 +94,10 @@ export class BackupExportService {
 					if (!relativePath) {
 						continue;
 					}
+					const safeRelativePath =
+						validateVaultRelativePath(relativePath);
 					files.push({
-						zipPath: `${dateKey}/${relativePath}`,
+						zipPath: `${dateKey}/${safeRelativePath}`,
 						key: object.key,
 					});
 				}
@@ -116,9 +126,10 @@ export class BackupExportService {
 			});
 
 			const zipBuffer = await zip.generateAsync({ type: 'arraybuffer' });
-			const outputPath = normalizePath(
-				`${exportBasePath.replace(/\/?$/, '/')}` +
-					`s3-backup-${selectedDateKeys.join('-')}.zip`,
+			const outputPath = joinSafeVaultPath(
+				exportBasePath,
+				`s3-backup-${selectedDateKeys.join('-')}.zip`,
+				this.vault.configDir,
 			);
 			await this.writeExportFile(outputPath, zipBuffer);
 			return outputPath;
@@ -136,7 +147,7 @@ export class BackupExportService {
 		await ensureParentFolders(this.vault, path);
 		const existing = this.vault.getAbstractFileByPath(path);
 		if (existing) {
-			await this.vault.delete(existing, true);
+			await this.app.fileManager.trashFile(existing);
 		}
 		await this.vault.createBinary(path, content);
 	}

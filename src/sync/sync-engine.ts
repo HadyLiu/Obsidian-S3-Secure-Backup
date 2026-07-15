@@ -1,5 +1,9 @@
 import { type App, TFile, type Vault } from 'obsidian';
 import type { FileRecord, MetadataStore } from '../database/metadata-store';
+import {
+	validateS3Endpoint,
+	validateVaultRelativePath,
+} from '../security/validation';
 import type { S3BackupSettings } from '../settings';
 import { formatS3Error } from '../s3/client';
 import type { CloudObject } from '../s3/storage-service';
@@ -81,7 +85,12 @@ export class SyncEngine {
 		const configPrefix = `${this.configDir}/`;
 		const files = new Map<string, TFile>();
 		for (const file of this.vault.getFiles()) {
-			if (file.path === this.configDir || file.path.startsWith(configPrefix)) {
+			if (
+				file.path === this.configDir ||
+				file.path.startsWith(configPrefix) ||
+				file.path === '.trash' ||
+				file.path.startsWith('.trash/')
+			) {
 				continue;
 			}
 			files.set(file.path, file);
@@ -99,10 +108,11 @@ export class SyncEngine {
 		const pendingPaths = new Set(database.pending_deletes);
 
 		for (const [key, cloud] of cloudIndex) {
-			const record = database.files[key];
-			const localFile = localFiles.get(key);
-
 			try {
+				validateVaultRelativePath(key, this.configDir);
+				const record = database.files[key];
+				const localFile = localFiles.get(key);
+
 				if (!record) {
 					await this.downloadCloudFile(key, cloud, storage);
 					result.pulled += 1;
@@ -145,7 +155,7 @@ export class SyncEngine {
 			const localFile = localFiles.get(path);
 			try {
 				if (localFile && isLocalUnchanged(localFile, record)) {
-					await this.vault.delete(localFile);
+					await this.app.fileManager.trashFile(localFile);
 					delete database.files[path];
 					result.localDeleted += 1;
 					continue;
@@ -165,23 +175,24 @@ export class SyncEngine {
 		cloud: CloudObject,
 		storage: S3StorageService,
 	): Promise<void> {
+		const safeKey = validateVaultRelativePath(key, this.configDir);
 		const content = await storage.download(key);
 		const checksum = calculateMd5(content);
 		const cloudMd5 = etagToMd5(cloud.etag) ?? checksum.hex;
-		const existing = this.vault.getAbstractFileByPath(key);
+		const existing = this.vault.getAbstractFileByPath(safeKey);
 
 		if (existing instanceof TFile) {
 			await this.vault.modifyBinary(existing, content);
 		} else {
-			await this.vault.createBinary(key, content);
+			await this.vault.createBinary(safeKey, content);
 		}
 
-		const savedFile = this.vault.getAbstractFileByPath(key);
+		const savedFile = this.vault.getAbstractFileByPath(safeKey);
 		if (!(savedFile instanceof TFile)) {
 			throw new Error('Failed to save downloaded file locally.');
 		}
 
-		this.metadataStore.database.files[key] = createFileRecord(
+		this.metadataStore.database.files[safeKey] = createFileRecord(
 			savedFile,
 			cloudMd5,
 		);
@@ -317,6 +328,7 @@ function validateSettings(settings: S3BackupSettings): void {
 	) {
 		throw new Error('Complete the S3 connection settings before syncing.');
 	}
+	validateS3Endpoint(settings.endpoint);
 }
 
 function createSyncResult(): SyncResult {

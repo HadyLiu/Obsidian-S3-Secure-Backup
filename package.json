@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-sample-plugin",
-	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"name": "obsidian-s3-secure-backup",
+	"version": "0.1.0",
+	"description": "Bidirectional S3-compatible sync with trash and daily diff recovery",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
