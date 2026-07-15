@@ -1,15 +1,17 @@
-import type { TFile, Vault } from 'obsidian';
-import type {
-	FileRecord,
-	MetadataStore,
-	PendingDelete,
-} from '../database/metadata-store';
+import { type App, TFile, type Vault } from 'obsidian';
+import type { FileRecord, MetadataStore } from '../database/metadata-store';
 import type { S3BackupSettings } from '../settings';
 import { formatS3Error } from '../s3/client';
+import type { CloudObject } from '../s3/storage-service';
 import { S3StorageService } from '../s3/storage-service';
 import { calculateMd5 } from './checksum';
+import { etagToMd5 } from './etag';
+import { createConflictPath, createWasteKey } from './paths';
 
 export interface SyncResult {
+	pulled: number;
+	conflicts: number;
+	localDeleted: number;
 	uploaded: number;
 	metadataUpdated: number;
 	deleted: number;
@@ -22,6 +24,7 @@ export class SyncEngine {
 	private running = false;
 
 	constructor(
+		private readonly app: App,
 		private readonly vault: Vault,
 		private readonly configDir: string,
 		private readonly metadataStore: MetadataStore,
@@ -45,9 +48,25 @@ export class SyncEngine {
 
 		try {
 			const localFiles = this.scanLocalFiles();
-			await this.reconcileDeleteQueue(localFiles);
-			await this.syncLocalFiles(localFiles, storage, result);
+			const cloudObjects = await storage.listVaultObjects();
+			const cloudIndex = new Map(
+				cloudObjects.map((object) => [object.key, object]),
+			);
+
+			await this.pullCloudChanges(
+				cloudIndex,
+				localFiles,
+				storage,
+				result,
+			);
+			await this.reconcileDeleteQueue(this.scanLocalFiles());
+			await this.pushLocalChanges(this.scanLocalFiles(), storage, result);
 			await this.processPendingDeletes(storage, result);
+
+			if (result.errors.length === 0) {
+				this.metadataStore.database.last_sync_time = Date.now();
+			}
+
 			await this.metadataStore.save();
 			result.pendingDeletes =
 				this.metadataStore.database.pending_deletes.length;
@@ -70,31 +89,150 @@ export class SyncEngine {
 		return files;
 	}
 
+	private async pullCloudChanges(
+		cloudIndex: Map<string, CloudObject>,
+		localFiles: Map<string, TFile>,
+		storage: S3StorageService,
+		result: SyncResult,
+	): Promise<void> {
+		const database = this.metadataStore.database;
+		const pendingPaths = new Set(database.pending_deletes);
+
+		for (const [key, cloud] of cloudIndex) {
+			const record = database.files[key];
+			const localFile = localFiles.get(key);
+
+			try {
+				if (!record) {
+					await this.downloadCloudFile(key, cloud, storage);
+					result.pulled += 1;
+					continue;
+				}
+
+				if (!isCloudChanged(cloud, record)) {
+					continue;
+				}
+
+				if (isLocalUnchanged(localFile, record)) {
+					await this.downloadCloudFile(key, cloud, storage);
+					result.pulled += 1;
+					continue;
+				}
+
+				if (localFile) {
+					await this.resolveConflict(localFile, key, cloud, storage);
+					result.conflicts += 1;
+					continue;
+				}
+
+				await this.downloadCloudFile(key, cloud, storage);
+				result.pulled += 1;
+			} catch (error) {
+				result.errors.push(`${key} pull: ${formatError(error)}`);
+			}
+		}
+
+		for (const path of Object.keys(database.files)) {
+			if (cloudIndex.has(path) || pendingPaths.has(path)) {
+				continue;
+			}
+
+			const record = database.files[path];
+			if (!record) {
+				continue;
+			}
+
+			const localFile = localFiles.get(path);
+			try {
+				if (localFile && isLocalUnchanged(localFile, record)) {
+					await this.vault.delete(localFile);
+					delete database.files[path];
+					result.localDeleted += 1;
+					continue;
+				}
+
+				if (!localFile) {
+					delete database.files[path];
+				}
+			} catch (error) {
+				result.errors.push(`${path} local delete: ${formatError(error)}`);
+			}
+		}
+	}
+
+	private async downloadCloudFile(
+		key: string,
+		cloud: CloudObject,
+		storage: S3StorageService,
+	): Promise<void> {
+		const content = await storage.download(key);
+		const checksum = calculateMd5(content);
+		const cloudMd5 = etagToMd5(cloud.etag) ?? checksum.hex;
+		const existing = this.vault.getAbstractFileByPath(key);
+
+		if (existing instanceof TFile) {
+			await this.vault.modifyBinary(existing, content);
+		} else {
+			await this.vault.createBinary(key, content);
+		}
+
+		const savedFile = this.vault.getAbstractFileByPath(key);
+		if (!(savedFile instanceof TFile)) {
+			throw new Error('Failed to save downloaded file locally.');
+		}
+
+		this.metadataStore.database.files[key] = createFileRecord(
+			savedFile,
+			cloudMd5,
+		);
+	}
+
+	private async resolveConflict(
+		localFile: TFile,
+		key: string,
+		cloud: CloudObject,
+		storage: S3StorageService,
+	): Promise<void> {
+		const conflictAt = new Date();
+		const conflictPath = createConflictPath(key, conflictAt);
+		await this.app.fileManager.renameFile(localFile, conflictPath);
+
+		const conflictFile = this.vault.getAbstractFileByPath(conflictPath);
+		if (!(conflictFile instanceof TFile)) {
+			throw new Error('Failed to create local conflict copy.');
+		}
+
+		const conflictContent = await this.vault.readBinary(conflictFile);
+		const conflictChecksum = calculateMd5(conflictContent);
+		this.metadataStore.database.files[conflictPath] = createFileRecord(
+			conflictFile,
+			conflictChecksum.hex,
+		);
+
+		await this.downloadCloudFile(key, cloud, storage);
+	}
+
 	private async reconcileDeleteQueue(
 		localFiles: Map<string, TFile>,
 	): Promise<void> {
 		const database = this.metadataStore.database;
 
-		// A file recreated before deletion processing must not be removed remotely.
-		database.pending_deletes = database.pending_deletes.filter((pending) =>
-			!localFiles.has(pending.path),
+		database.pending_deletes = database.pending_deletes.filter(
+			(path) => !localFiles.has(path),
 		);
 
-		const queuedPaths = new Set(
-			database.pending_deletes.map((pending) => pending.path),
-		);
+		const queuedPaths = new Set(database.pending_deletes);
 		for (const path of Object.keys(database.files)) {
 			if (localFiles.has(path) || queuedPaths.has(path)) {
 				continue;
 			}
-			database.pending_deletes.push(createPendingDelete(path));
+			database.pending_deletes.push(path);
 		}
 
-		// Persist intent before any cloud-side copy/delete transaction begins.
 		await this.metadataStore.save();
 	}
 
-	private async syncLocalFiles(
+	private async pushLocalChanges(
 		localFiles: Map<string, TFile>,
 		storage: S3StorageService,
 		result: SyncResult,
@@ -126,7 +264,7 @@ export class SyncEngine {
 				records[path] = createFileRecord(file, checksum.hex);
 				result.uploaded += 1;
 			} catch (error) {
-				result.errors.push(`${path}: ${formatError(error)}`);
+				result.errors.push(`${path} push: ${formatError(error)}`);
 			}
 		}
 	}
@@ -136,38 +274,33 @@ export class SyncEngine {
 		result: SyncResult,
 	): Promise<void> {
 		const database = this.metadataStore.database;
-		const pendingItems = [...database.pending_deletes];
+		const pendingPaths = [...database.pending_deletes];
 
-		for (const pending of pendingItems) {
-			// Recheck immediately before cloud mutation to reduce filesystem race risk.
-			if (this.vault.getAbstractFileByPath(pending.path)) {
+		for (const path of pendingPaths) {
+			if (this.vault.getAbstractFileByPath(path)) {
 				database.pending_deletes = database.pending_deletes.filter(
-					(item) => item.path !== pending.path,
+					(item) => item !== path,
 				);
 				await this.metadataStore.save();
 				continue;
 			}
 
 			try {
-				if (!pending.copyCompleted) {
-					await storage.copyToWaste(pending.path, pending.wasteKey);
-					pending.copyCompleted = true;
-					delete pending.lastError;
-					// Durably open the delete gate only after CopyObject succeeds.
-					await this.metadataStore.save();
-				}
-
-				await storage.delete(pending.path);
-				delete database.files[pending.path];
+				const wasteKey = createWasteKey(path, new Date());
+				await storage.copyToWaste(path, wasteKey);
+				await storage.delete(path);
+				delete database.files[path];
 				database.pending_deletes = database.pending_deletes.filter(
-					(item) => item.path !== pending.path,
+					(item) => item !== path,
 				);
 				result.deleted += 1;
 				await this.metadataStore.save();
 			} catch (error) {
-				pending.lastError = formatError(error);
+				if (!database.pending_deletes.includes(path)) {
+					database.pending_deletes.push(path);
+				}
 				result.errors.push(
-					`${pending.path} delete transaction: ${pending.lastError}`,
+					`${path} delete transaction: ${formatError(error)}`,
 				);
 				await this.metadataStore.save();
 			}
@@ -188,6 +321,9 @@ function validateSettings(settings: S3BackupSettings): void {
 
 function createSyncResult(): SyncResult {
 	return {
+		pulled: 0,
+		conflicts: 0,
+		localDeleted: 0,
 		uploaded: 0,
 		metadataUpdated: 0,
 		deleted: 0,
@@ -206,37 +342,23 @@ function createFileRecord(file: TFile, md5: string): FileRecord {
 	};
 }
 
-function createPendingDelete(path: string): PendingDelete {
-	const deletedAt = Date.now();
-	return {
-		path,
-		wasteKey: createWasteKey(path, new Date(deletedAt)),
-		deletedAt,
-		copyCompleted: false,
-	};
+function isLocalUnchanged(
+	localFile: TFile | undefined,
+	record: FileRecord,
+): boolean {
+	return Boolean(
+		localFile &&
+			localFile.stat.mtime === record.mtime &&
+			localFile.stat.size === record.size,
+	);
 }
 
-function createWasteKey(path: string, deletedAt: Date): string {
-	const separatorIndex = path.lastIndexOf('/');
-	const directory =
-		separatorIndex >= 0 ? `${path.slice(0, separatorIndex)}/` : '';
-	const filename =
-		separatorIndex >= 0 ? path.slice(separatorIndex + 1) : path;
-	return `.wastePaper/${directory}${formatTimestamp(deletedAt)}_${filename}`;
-}
-
-function formatTimestamp(date: Date): string {
-	const year = String(date.getFullYear());
-	const month = padTwoDigits(date.getMonth() + 1);
-	const day = padTwoDigits(date.getDate());
-	const hour = padTwoDigits(date.getHours());
-	const minute = padTwoDigits(date.getMinutes());
-	const second = padTwoDigits(date.getSeconds());
-	return `${year}${month}${day}_${hour}${minute}${second}`;
-}
-
-function padTwoDigits(value: number): string {
-	return String(value).padStart(2, '0');
+function isCloudChanged(cloud: CloudObject, record: FileRecord): boolean {
+	const cloudMd5 = etagToMd5(cloud.etag);
+	if (cloudMd5) {
+		return cloudMd5 !== record.md5;
+	}
+	return cloud.size !== record.size;
 }
 
 function formatError(error: unknown): string {

@@ -25,6 +25,7 @@ export default class S3SecureBackupPlugin extends Plugin {
 		);
 		await this.metadataStore.load();
 		this.syncEngine = new SyncEngine(
+			this.app,
 			this.app.vault,
 			this.app.vault.configDir,
 			this.metadataStore,
@@ -34,7 +35,7 @@ export default class S3SecureBackupPlugin extends Plugin {
 		this.addSettingTab(new S3BackupSettingTab(this.app, this));
 		this.addCommand({
 			id: 'sync-now',
-			name: 'Sync to S3 now',
+			name: 'Sync with S3 now',
 			callback: () => {
 				void this.runManualSync();
 			},
@@ -132,8 +133,10 @@ function hasCompleteConnectionSettings(settings: S3BackupSettings): boolean {
 
 function formatSyncResult(result: SyncResult): string {
 	const summary =
-		`S3 backup complete: ${result.uploaded} uploaded, ` +
-		`${result.deleted} deleted, ${result.skipped} unchanged.`;
+		`S3 sync complete: ${result.pulled} pulled, ` +
+		`${result.uploaded} uploaded, ${result.conflicts} conflict(s), ` +
+		`${result.localDeleted} local deleted, ${result.deleted} remote deleted, ` +
+		`${result.skipped} unchanged.`;
 	if (result.errors.length === 0) {
 		return summary;
 	}
