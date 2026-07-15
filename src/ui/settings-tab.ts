@@ -95,9 +95,11 @@ export class S3BackupSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Copy to clipboard')
-			.setDesc('Copy non-secret S3 settings. The secret key is never copied.')
+			.setDesc(
+				'Copy endpoint, region, bucket, credentials, and sync interval as a single query string.',
+			)
 			.addButton((button) =>
-				button.setButtonText('Copy without secret').onClick(() => {
+				button.setButtonText('Copy').onClick(() => {
 					void this.copyToClipboard();
 				}),
 			);
@@ -220,7 +222,7 @@ export class S3BackupSettingTab extends PluginSettingTab {
 		try {
 			const payload = formatClipboardConfig(this.plugin.settings);
 			await navigator.clipboard.writeText(payload);
-			showSuccessNotice('Configuration copied without the secret key.');
+			showSuccessNotice('Configuration copied to clipboard.');
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : 'Failed to write clipboard.';

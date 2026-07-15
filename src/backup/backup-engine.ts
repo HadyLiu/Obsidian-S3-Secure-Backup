@@ -53,7 +53,10 @@ export class BackupEngine {
 		const backupPrefix = `.Backup/${settings.bucket.trim()}/${backupDate}_backup`;
 
 		try {
-			const diffFiles = selectDiffFiles(this.metadataStore.database.files);
+			const diffFiles = await selectDiffFiles(
+				this.metadataStore.database.files,
+				this.vault,
+			);
 			for (const record of diffFiles) {
 				const localFile = this.vault.getAbstractFileByPath(record.path);
 				if (!(localFile instanceof TFile)) {
@@ -98,11 +101,32 @@ function validateSettings(settings: S3BackupSettings): void {
 	validateS3Endpoint(settings.endpoint);
 }
 
-function selectDiffFiles(
+async function selectDiffFiles(
 	files: Record<string, FileRecord>,
-): FileRecord[] {
+	vault: Vault,
+): Promise<FileRecord[]> {
 	const cutoff = Date.now() - DAY_MS;
-	return Object.values(files).filter((record) => record.mtime >= cutoff);
+	const diffFiles: FileRecord[] = [];
+
+	for (const record of Object.values(files)) {
+		if (record.mtime >= cutoff) {
+			diffFiles.push(record);
+			continue;
+		}
+
+		const localFile = vault.getAbstractFileByPath(record.path);
+		if (!(localFile instanceof TFile)) {
+			continue;
+		}
+
+		const content = await vault.readBinary(localFile);
+		const checksum = calculateMd5(content);
+		if (checksum.hex !== record.md5) {
+			diffFiles.push(record);
+		}
+	}
+
+	return diffFiles;
 }
 
 function formatBackupDate(date: Date): string {
