@@ -15,10 +15,10 @@ export default class S3SecureBackupPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		const stored = (await this.loadData()) as Partial<S3BackupSettings>;
+		const stored = ((await this.loadData()) ?? {}) as Partial<S3BackupSettings>;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, stored);
 
-		if (!stored.backupExportPath) {
+		if (!this.settings.backupExportPath) {
 			this.settings.backupExportPath = DEFAULT_BACKUP_EXPORT_PATH;
 		}
 	}
