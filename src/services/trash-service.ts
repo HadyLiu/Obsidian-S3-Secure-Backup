@@ -1,4 +1,8 @@
-import { normalizePath, type Vault } from 'obsidian';
+import type { App, Vault } from 'obsidian';
+import {
+	joinSafeVaultPath,
+	validateVaultRelativePath,
+} from '../security/validation';
 import {
 	DEFAULT_BACKUP_EXPORT_PATH,
 	type S3BackupSettings,
@@ -15,7 +19,9 @@ import {
 
 export class TrashService {
 	constructor(
+		private readonly app: App,
 		private readonly vault: Vault,
+		private readonly configDir: string,
 		private readonly getSettings: () => S3BackupSettings,
 	) {}
 
@@ -58,7 +64,11 @@ export class TrashService {
 			}
 
 			const restoreBase = getRestoreBasePath(settings.backupExportPath);
-			const targetPath = normalizePath(`${restoreBase}${item.originalPath}`);
+			const targetPath = joinSafeVaultPath(
+				restoreBase,
+				item.originalPath,
+				this.configDir,
+			);
 			const uniquePath = resolveUniquePath(this.vault, targetPath);
 
 			try {
@@ -74,16 +84,21 @@ export class TrashService {
 			try {
 				await storage.copyObject(item.key, pickupKey);
 			} catch (error) {
+				const rolledBack = await this.rollbackLocalRestore(uniquePath);
 				throw new Error(
-					`Audit copy to .pickUpPaper/ failed: ${formatS3Error(error)}`,
+					`Audit copy to .pickUpPaper/ failed: ${formatS3Error(error)}` +
+						(rolledBack ? '' : ' Local rollback also failed.'),
 				);
 			}
 
 			try {
 				await storage.delete(item.key);
 			} catch (error) {
+				const rolledBack = await this.rollbackLocalRestore(uniquePath);
 				throw new Error(
-					`Delete from .wastePaper/ failed: ${formatS3Error(error)}`,
+					`Delete from .wastePaper/ failed; the audit copy was retained: ` +
+						formatS3Error(error) +
+						(rolledBack ? '' : ' Local rollback also failed.'),
 				);
 			}
 
@@ -96,6 +111,18 @@ export class TrashService {
 	private createStorage(): S3StorageService {
 		return new S3StorageService(this.getSettings());
 	}
+
+	private async rollbackLocalRestore(path: string): Promise<boolean> {
+		try {
+			const restoredFile = this.vault.getAbstractFileByPath(path);
+			if (restoredFile) {
+				await this.app.fileManager.trashFile(restoredFile);
+			}
+			return true;
+		} catch {
+			return false;
+		}
+	}
 }
 
 export function getRestoreBasePath(backupExportPath: string): string {
@@ -107,7 +134,7 @@ export function getRestoreBasePath(backupExportPath: string): string {
 	) {
 		return '已恢复/';
 	}
-	return normalizePath(`${normalized.replace(/\/+$/, '')}/`);
+	return `${validateVaultRelativePath(normalized)}/`;
 }
 
 export function resolveUniquePath(vault: Vault, targetPath: string): string {

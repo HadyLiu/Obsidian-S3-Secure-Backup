@@ -1,9 +1,10 @@
 import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+import { validateS3Endpoint } from '../security/validation';
 import type { S3BackupSettings } from '../settings';
 import { ObsidianHttpHandler } from './obsidian-http-handler';
 
 function normalizeEndpoint(endpoint: string): string {
-	return endpoint.trim().replace(/\/+$/, '');
+	return validateS3Endpoint(endpoint);
 }
 
 function shouldUsePathStyle(endpoint: string): boolean {
@@ -85,11 +86,7 @@ export function formatS3Error(error: unknown): string {
 		parts.push(String(code));
 	}
 
-	if (awsError.message) {
-		parts.push(awsError.message);
-	}
-
-	return parts.join(' — ') || 'Unknown connection error.';
+	return parts.join(' — ') || 'Request failed. See the endpoint and permissions.';
 }
 
 export async function testBucketConnection(
@@ -105,19 +102,20 @@ export async function testBucketConnection(
 		return { ok: false, message: 'Access key ID and secret are required.' };
 	}
 
-	const client = createS3Client(settings);
-
 	try {
-		await client.send(
-			new ListObjectsV2Command({
-				Bucket: settings.bucket.trim(),
-				MaxKeys: 1,
-			}),
-		);
-		return { ok: true };
+		const client = createS3Client(settings);
+		try {
+			await client.send(
+				new ListObjectsV2Command({
+					Bucket: settings.bucket.trim(),
+					MaxKeys: 1,
+				}),
+			);
+			return { ok: true };
+		} finally {
+			client.destroy();
+		}
 	} catch (error) {
 		return { ok: false, message: formatS3Error(error) };
-	} finally {
-		client.destroy();
 	}
 }

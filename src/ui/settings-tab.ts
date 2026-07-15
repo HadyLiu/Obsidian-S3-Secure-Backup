@@ -1,16 +1,20 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
+import { validateS3Endpoint } from '../security/validation';
 import { testBucketConnection } from '../s3/client';
 import {
 	clampSyncInterval,
+	DEFAULT_BACKUP_EXPORT_PATH,
 	formatClipboardConfig,
 	MIN_SYNC_INTERVAL_SECONDS,
 	parseClipboardConfig,
 	type S3BackupSettings,
 } from '../settings';
 import type S3SecureBackupPlugin from '../main';
+import { ConfirmModal } from './confirm-modal';
 
 function showSuccessNotice(message: string): void {
 	const notice = new Notice('', 4000);
+	// Prefer noticeEl for minAppVersion compatibility (< 1.8.7).
 	notice.noticeEl.empty();
 	notice.noticeEl.createSpan({
 		cls: 's3-backup-notice--success',
@@ -41,7 +45,7 @@ export class S3BackupSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl).setName('S3 connection').setHeading();
 
-		this.addTextSetting('endpoint', 'Endpoint', 'https://account.r2.cloudflarestorage.com');
+		this.addEndpointSetting();
 		this.addTextSetting('region', 'Region', 'auto');
 		this.addTextSetting('bucket', 'Bucket', 'my-vault-backup');
 		this.addTextSetting('accessKeyId', 'Access key ID', '');
@@ -66,13 +70,14 @@ export class S3BackupSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Backup export path')
-			.setDesc('Folder inside the vault for exported backups.')
+			.setDesc('Vault-relative folder for exported backups. Absolute paths and ../ are rejected at export/restore time.')
 			.addText((text) =>
 				text
 					.setPlaceholder('Export folder path')
 					.setValue(this.plugin.settings.backupExportPath)
 					.onChange(async (value) => {
-						this.plugin.settings.backupExportPath = value;
+						this.plugin.settings.backupExportPath =
+							value.trim() || DEFAULT_BACKUP_EXPORT_PATH;
 						await this.plugin.saveSettings();
 					}),
 			);
@@ -90,9 +95,9 @@ export class S3BackupSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Copy to clipboard')
-			.setDesc('Copy current S3 settings as a single-line query string.')
+			.setDesc('Copy non-secret S3 settings. The secret key is never copied.')
 			.addButton((button) =>
-				button.setButtonText('Copy').onClick(() => {
+				button.setButtonText('Copy without secret').onClick(() => {
 					void this.copyToClipboard();
 				}),
 			);
@@ -119,10 +124,25 @@ export class S3BackupSettingTab extends PluginSettingTab {
 		});
 	}
 
+	private addEndpointSetting(): void {
+		new Setting(this.containerEl)
+			.setName('Endpoint')
+			.setDesc('HTTPS S3-compatible endpoint URL only. Validated before sync and connection tests.')
+			.addText((text) =>
+				text
+					.setPlaceholder('https://account.r2.cloudflarestorage.com')
+					.setValue(this.plugin.settings.endpoint)
+					.onChange(async (value) => {
+						this.plugin.settings.endpoint = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+	}
+
 	private addTextSetting(
 		key: keyof Pick<
 			S3BackupSettings,
-			'endpoint' | 'region' | 'bucket' | 'accessKeyId'
+			'region' | 'bucket' | 'accessKeyId'
 		>,
 		name: string,
 		placeholder: string,
@@ -169,6 +189,22 @@ export class S3BackupSettingTab extends PluginSettingTab {
 				return;
 			}
 
+			if (parsed.endpoint) {
+				parsed.endpoint = validateS3Endpoint(parsed.endpoint);
+				const currentEndpoint = this.plugin.settings.endpoint.trim();
+				if (parsed.endpoint !== currentEndpoint) {
+					const confirmed = await new ConfirmModal(
+						this.app,
+						'Confirm S3 endpoint',
+						`Import S3 endpoint ${parsed.endpoint}? Credentials will be signed against this server.`,
+					).openAndWait();
+					if (!confirmed) {
+						showErrorNotice('Import cancelled.');
+						return;
+					}
+				}
+			}
+
 			Object.assign(this.plugin.settings, parsed);
 			await this.plugin.saveSettings();
 			this.display();
@@ -184,7 +220,7 @@ export class S3BackupSettingTab extends PluginSettingTab {
 		try {
 			const payload = formatClipboardConfig(this.plugin.settings);
 			await navigator.clipboard.writeText(payload);
-			showSuccessNotice('Configuration copied to clipboard.');
+			showSuccessNotice('Configuration copied without the secret key.');
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : 'Failed to write clipboard.';

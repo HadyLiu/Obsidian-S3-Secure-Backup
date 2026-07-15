@@ -1,5 +1,6 @@
 import { TFile, type Vault } from 'obsidian';
 import type { FileRecord, MetadataStore } from '../database/metadata-store';
+import { validateS3Endpoint } from '../security/validation';
 import type { S3BackupSettings } from '../settings';
 import { formatS3Error } from '../s3/client';
 import { S3StorageService } from '../s3/storage-service';
@@ -94,6 +95,7 @@ function validateSettings(settings: S3BackupSettings): void {
 	) {
 		throw new Error('Complete the S3 connection settings before backing up.');
 	}
+	validateS3Endpoint(settings.endpoint);
 }
 
 function selectDiffFiles(

@@ -21,9 +21,6 @@ export const DEFAULT_SETTINGS: S3BackupSettings = {
 	backupExportPath: DEFAULT_BACKUP_EXPORT_PATH,
 };
 
-const CLIPBOARD_CONFIG_REGEX =
-	/(endpoint|region|bucket|accessKeyId|secretAccessKey|syncIntervalSeconds)=['"]?(.*?)['"]?(&|$)/g;
-
 const CLIPBOARD_CONFIG_KEYS = new Set([
 	'endpoint',
 	'region',
@@ -37,15 +34,18 @@ export function parseClipboardConfig(
 	text: string,
 ): Partial<S3BackupSettings> {
 	const result: Partial<S3BackupSettings> = {};
-	const regex = new RegExp(CLIPBOARD_CONFIG_REGEX.source, 'g');
-	let match: RegExpExecArray | null;
+	for (const pair of text.split('&')) {
+		const separatorIndex = pair.indexOf('=');
+		if (separatorIndex < 1) {
+			continue;
+		}
 
-	while ((match = regex.exec(text)) !== null) {
-		const key = match[1];
-		const rawValue = match[2]?.trim() ?? '';
+		const key = pair.slice(0, separatorIndex).trim();
 		if (!key || !CLIPBOARD_CONFIG_KEYS.has(key)) {
 			continue;
 		}
+		const encodedValue = pair.slice(separatorIndex + 1).trim();
+		const rawValue = decodeClipboardValue(encodedValue);
 
 		if (key === 'syncIntervalSeconds') {
 			const parsed = Number.parseInt(rawValue, 10);
@@ -67,14 +67,15 @@ export function parseClipboardConfig(
 
 export function formatClipboardConfig(settings: S3BackupSettings): string {
 	const pairs = [
-		`endpoint='${settings.endpoint}'`,
-		`region='${settings.region}'`,
-		`bucket='${settings.bucket}'`,
-		`accessKeyId='${settings.accessKeyId}'`,
-		`secretAccessKey='${settings.secretAccessKey}'`,
-		`syncIntervalSeconds='${settings.syncIntervalSeconds}'`,
+		['endpoint', settings.endpoint],
+		['region', settings.region],
+		['bucket', settings.bucket],
+		['accessKeyId', settings.accessKeyId],
+		['syncIntervalSeconds', String(settings.syncIntervalSeconds)],
 	];
-	return pairs.join('&');
+	return pairs
+		.map(([key, value]) => `${key}=${encodeURIComponent(value ?? '')}`)
+		.join('&');
 }
 
 export function clampSyncInterval(seconds: number): number {
@@ -82,4 +83,17 @@ export function clampSyncInterval(seconds: number): number {
 		return MIN_SYNC_INTERVAL_SECONDS;
 	}
 	return Math.max(MIN_SYNC_INTERVAL_SECONDS, Math.floor(seconds));
+}
+
+function decodeClipboardValue(value: string): string {
+	const unquoted =
+		(value.startsWith("'") && value.endsWith("'")) ||
+		(value.startsWith('"') && value.endsWith('"'))
+			? value.slice(1, -1)
+			: value;
+	try {
+		return decodeURIComponent(unquoted).trim();
+	} catch {
+		return unquoted.trim();
+	}
 }

@@ -1,5 +1,6 @@
 import type { DataAdapter } from 'obsidian';
 import { normalizePath } from 'obsidian';
+import { validateVaultRelativePath } from '../security/validation';
 
 const DATABASE_VERSION = 2;
 
@@ -28,7 +29,7 @@ function createEmptyDatabase(): MetadataDatabase {
 	};
 }
 
-function normalizePendingDeletes(raw: unknown): string[] {
+function normalizePendingDeletes(raw: unknown, configDir: string): string[] {
 	if (!Array.isArray(raw)) {
 		return [];
 	}
@@ -47,12 +48,14 @@ function normalizePendingDeletes(raw: unknown): string[] {
 			}
 			return null;
 		})
-		.filter((path): path is string => Boolean(path));
+		.filter((path): path is string => Boolean(path))
+		.filter((path) => isSafeMetadataPath(path, configDir));
 }
 
 export class MetadataStore {
 	private readonly directoryPath: string;
 	private readonly filePath: string;
+	private readonly configDir: string;
 	private data: MetadataDatabase = createEmptyDatabase();
 
 	constructor(
@@ -60,6 +63,7 @@ export class MetadataStore {
 		configDir: string,
 		pluginId: string,
 	) {
+		this.configDir = configDir;
 		this.directoryPath = normalizePath(
 			`${configDir}/plugins/${pluginId}/.Database`,
 		);
@@ -86,8 +90,11 @@ export class MetadataStore {
 			version: DATABASE_VERSION,
 			last_sync_time: parsed.last_sync_time ?? 0,
 			last_backup_time: parsed.last_backup_time ?? 0,
-			files: parsed.files ?? {},
-			pending_deletes: normalizePendingDeletes(parsed.pending_deletes),
+			files: normalizeFileRecords(parsed.files, this.configDir),
+			pending_deletes: normalizePendingDeletes(
+				parsed.pending_deletes,
+				this.configDir,
+			),
 		};
 	}
 
@@ -112,5 +119,44 @@ export class MetadataStore {
 		if (!(await this.adapter.exists(this.directoryPath))) {
 			await this.adapter.mkdir(this.directoryPath);
 		}
+	}
+}
+
+function normalizeFileRecords(
+	raw: unknown,
+	configDir: string,
+): Record<string, FileRecord> {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+		return {};
+	}
+
+	const files: Record<string, FileRecord> = {};
+	for (const [path, value] of Object.entries(raw)) {
+		if (
+			!isSafeMetadataPath(path, configDir) ||
+			!value ||
+			typeof value !== 'object'
+		) {
+			continue;
+		}
+		const record = value as Partial<FileRecord>;
+		if (
+			typeof record.mtime !== 'number' ||
+			typeof record.size !== 'number' ||
+			typeof record.md5 !== 'string'
+		) {
+			continue;
+		}
+		files[path] = { path, mtime: record.mtime, size: record.size, md5: record.md5 };
+	}
+	return files;
+}
+
+function isSafeMetadataPath(path: string, configDir: string): boolean {
+	try {
+		validateVaultRelativePath(path, configDir);
+		return true;
+	} catch {
+		return false;
 	}
 }

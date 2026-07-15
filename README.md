@@ -1,4 +1,31 @@
-# Obsidian Sample Plugin
+# S3 Secure Backup
+
+Bidirectional synchronization between an Obsidian vault and S3-compatible
+storage, with a cloud trash area and daily differential recovery packages.
+
+## Security and privacy
+
+- Vault files are sent only to the S3 endpoint configured by the user.
+- This plugin does **not** provide client-side encryption. Configure encryption
+  at rest on the storage provider when required.
+- Obsidian stores plugin settings, including the S3 secret key, as plain text in
+  `.obsidian/plugins/Obsidian-S3-Secure-Backup/data.json`.
+- Use a dedicated least-privilege S3 credential. Never reuse an account-wide
+  credential, and rotate it immediately if the settings file is exposed.
+- Keep `.obsidian/plugins/*/data.json` out of Git and other untrusted sync
+  systems. This repository's `.gitignore` already excludes its local copy.
+- Copying settings to the clipboard intentionally excludes the secret key.
+- Only HTTPS S3 endpoints are accepted. Cloud object paths cannot write into
+  `.obsidian`, traverse directories, or escape a selected export folder.
+- A remote deletion moves the corresponding unchanged local file through
+  Obsidian's configured trash behavior instead of deleting it directly.
+
+The S3 provider receives the vault paths and file contents needed for sync.
+The plugin includes no telemetry, analytics, or unrelated network requests.
+
+---
+
+# Upstream sample development notes
 
 This is a sample plugin for Obsidian (https://obsidian.md).
 
