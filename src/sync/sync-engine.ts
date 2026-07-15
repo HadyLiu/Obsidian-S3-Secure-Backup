@@ -5,6 +5,7 @@ import type {
 	PendingDelete,
 } from '../database/metadata-store';
 import type { S3BackupSettings } from '../settings';
+import { formatS3Error } from '../s3/client';
 import { S3StorageService } from '../s3/storage-service';
 import { calculateMd5 } from './checksum';
 
@@ -239,5 +240,5 @@ function padTwoDigits(value: number): string {
 }
 
 function formatError(error: unknown): string {
-	return error instanceof Error ? error.message : 'Unknown error';
+	return formatS3Error(error);
 }

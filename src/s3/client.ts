@@ -19,7 +19,7 @@ function shouldUsePathStyle(endpoint: string): boolean {
 export function createS3Client(settings: S3BackupSettings): S3Client {
 	const endpoint = normalizeEndpoint(settings.endpoint);
 
-	return new S3Client({
+	const client = new S3Client({
 		endpoint,
 		region: settings.region.trim() || 'auto',
 		credentials: {
@@ -32,9 +32,37 @@ export function createS3Client(settings: S3BackupSettings): S3Client {
 		responseChecksumValidation: 'WHEN_REQUIRED',
 		requestHandler: new ObsidianHttpHandler(),
 	});
+
+	// R2 rejects flexible checksum headers that newer AWS SDK versions may attach.
+	client.middlewareStack.add(
+		(next) => async (args) => {
+			const request = args.request as { headers?: Record<string, string> };
+			if (request.headers) {
+				for (const key of Object.keys(request.headers)) {
+					const lower = key.toLowerCase();
+					if (
+						lower.startsWith('x-amz-checksum-') ||
+						lower === 'x-amz-sdk-checksum-algorithm' ||
+						lower === 'x-amz-trailer' ||
+						lower === 'x-amz-decoded-content-length'
+					) {
+						delete request.headers[key];
+					}
+				}
+			}
+			return next(args);
+		},
+		{
+			step: 'build',
+			name: 'stripFlexibleChecksumHeaders',
+			priority: 'low',
+		},
+	);
+
+	return client;
 }
 
-function formatS3Error(error: unknown): string {
+export function formatS3Error(error: unknown): string {
 	if (!(error instanceof Error)) {
 		return 'Unknown connection error.';
 	}

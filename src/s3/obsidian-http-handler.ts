@@ -6,6 +6,22 @@ import type {
 import { requestUrl } from 'obsidian';
 
 /**
+ * Headers Electron/Chromium rejects when set manually via requestUrl.
+ * Setting them causes net::ERR_INVALID_ARGUMENT.
+ */
+const FORBIDDEN_REQUEST_HEADERS = new Set([
+	'host',
+	'content-length',
+	'transfer-encoding',
+	'connection',
+	'keep-alive',
+	'trailer',
+	'te',
+	'upgrade',
+	'proxy-connection',
+]);
+
+/**
  * AWS SDK HTTP handler that uses Obsidian's requestUrl.
  * Bypasses browser CORS restrictions that break fetch() to R2/S3 endpoints.
  */
@@ -32,12 +48,15 @@ export class ObsidianHttpHandler {
 			throw: false,
 		});
 
+		// Must be Uint8Array (not ArrayBuffer).
+		// S3 throw200ExceptionsMiddleware short-circuits on Uint8Array;
+		// ArrayBuffer falls through to streamCollector and throws
+		// "stream.getReader is not a function".
 		return {
 			response: {
 				statusCode: result.status,
 				headers: normalizeResponseHeaders(result.headers),
-				// AWS SDK browser deserializer expects a ReadableStream with getReader().
-				body: arrayBufferToReadableStream(result.arrayBuffer),
+				body: new Uint8Array(result.arrayBuffer),
 			},
 		};
 	}
@@ -69,7 +88,6 @@ function buildRequestUrl(request: HttpRequest): string {
 	const path = request.path?.startsWith('/')
 		? request.path
 		: `/${request.path ?? ''}`;
-
 	const query = encodeQuery(request.query);
 	return `${protocol}//${request.hostname}${port}${path}${query}`;
 }
@@ -114,8 +132,7 @@ function flattenHeaders(
 		if (value === undefined || value === null) {
 			continue;
 		}
-		// Host is set by the HTTP stack; duplicating it can break signing hosts.
-		if (key.toLowerCase() === 'host') {
+		if (FORBIDDEN_REQUEST_HEADERS.has(key.toLowerCase())) {
 			continue;
 		}
 		result[key] = String(value);
@@ -150,6 +167,11 @@ async function serializeBody(
 	}
 	if (typeof Blob !== 'undefined' && body instanceof Blob) {
 		return await body.arrayBuffer();
+	}
+	if (typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) {
+		return await readableStreamToArrayBuffer(
+			body as ReadableStream<Uint8Array>,
+		);
 	}
 	if (
 		typeof (body as { transformToByteArray?: () => Promise<Uint8Array> })
@@ -188,11 +210,29 @@ function copyArrayBufferView(view: ArrayBufferView): ArrayBuffer {
 	return copy.buffer;
 }
 
-function arrayBufferToReadableStream(buffer: ArrayBuffer): ReadableStream<Uint8Array> {
-	return new ReadableStream({
-		start(controller) {
-			controller.enqueue(new Uint8Array(buffer));
-			controller.close();
-		},
-	});
+async function readableStreamToArrayBuffer(
+	stream: ReadableStream<Uint8Array>,
+): Promise<ArrayBuffer> {
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+
+	while (true) {
+		const { done, value } = await reader.read();
+		if (value) {
+			chunks.push(value);
+			total += value.byteLength;
+		}
+		if (done) {
+			break;
+		}
+	}
+
+	const merged = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		merged.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return merged.buffer;
 }

@@ -90,10 +90,17 @@ export default class S3SecureBackupPlugin extends Plugin {
 	private async runManualSync(): Promise<void> {
 		try {
 			const result = await this.syncEngine.sync();
-			new Notice(formatSyncResult(result), result.errors.length > 0 ? 8000 : 5000);
+			if (result.errors.length > 0) {
+				console.error('S3 backup errors:', result.errors);
+			}
+			new Notice(
+				formatSyncResult(result),
+				result.errors.length > 0 ? 12000 : 5000,
+			);
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : 'Unknown sync error.';
+			console.error('S3 backup failed:', error);
 			new Notice(`S3 backup failed: ${message}`, 8000);
 		}
 	}
@@ -130,6 +137,11 @@ function formatSyncResult(result: SyncResult): string {
 	if (result.errors.length === 0) {
 		return summary;
 	}
-	return `${summary} ${result.errors.length} error(s); ` +
-		`${result.pendingDeletes} deletion(s) pending retry.`;
+
+	const firstError = result.errors[0] ?? 'Unknown error';
+	return (
+		`${summary} ${result.errors.length} error(s); ` +
+		`${result.pendingDeletes} deletion(s) pending retry. ` +
+		`First error: ${firstError}`
+	);
 }
