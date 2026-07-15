@@ -36,24 +36,58 @@ export class TrashService {
 		return buildTrashTree(items);
 	}
 
+	/**
+	 * Restore transaction with circuit breaker:
+	 * 1. Download to local restore folder
+	 * 2. Copy waste object to .pickUpPaper/
+	 * 3. Delete the original waste object
+	 * Any step failure aborts the remaining steps.
+	 */
 	async restoreItem(item: TrashItem): Promise<string> {
 		const settings = this.getSettings();
 		const storage = this.createStorage();
 
 		try {
-			const content = await storage.download(item.key);
+			let content: ArrayBuffer;
+			try {
+				content = await storage.download(item.key);
+			} catch (error) {
+				throw new Error(
+					`Download failed: ${formatS3Error(error)}`,
+				);
+			}
+
 			const restoreBase = getRestoreBasePath(settings.backupExportPath);
 			const targetPath = normalizePath(`${restoreBase}${item.originalPath}`);
 			const uniquePath = resolveUniquePath(this.vault, targetPath);
-			await ensureParentFolders(this.vault, uniquePath);
-			await this.vault.createBinary(uniquePath, content);
-			await storage.copyObject(
-				item.key,
-				createPickupKey(item.originalPath, new Date()),
-			);
+
+			try {
+				await ensureParentFolders(this.vault, uniquePath);
+				await this.vault.createBinary(uniquePath, content);
+			} catch (error) {
+				throw new Error(
+					`Save locally failed: ${formatS3Error(error)}`,
+				);
+			}
+
+			const pickupKey = createPickupKey(item.originalPath, new Date());
+			try {
+				await storage.copyObject(item.key, pickupKey);
+			} catch (error) {
+				throw new Error(
+					`Audit copy to .pickUpPaper/ failed: ${formatS3Error(error)}`,
+				);
+			}
+
+			try {
+				await storage.delete(item.key);
+			} catch (error) {
+				throw new Error(
+					`Delete from .wastePaper/ failed: ${formatS3Error(error)}`,
+				);
+			}
+
 			return uniquePath;
-		} catch (error) {
-			throw new Error(formatS3Error(error));
 		} finally {
 			storage.destroy();
 		}

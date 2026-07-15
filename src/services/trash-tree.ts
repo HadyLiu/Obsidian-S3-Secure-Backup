@@ -60,6 +60,46 @@ export function createPickupKey(originalPath: string, restoredAt: Date): string 
 	return `${PICKUP_PREFIX}${formatTimestamp(restoredAt)}_${originalPath}`;
 }
 
+/**
+ * Remove a trash item by cloud key. Returns true if found and removed.
+ * Empty folders left behind are pruned so the tree stays clean.
+ */
+export function removeTrashItemByKey(
+	root: TrashFolderNode,
+	key: string,
+): boolean {
+	const removed = removeTrashItemRecursive(root, key);
+	if (removed) {
+		pruneEmptyFolders(root);
+	}
+	return removed;
+}
+
+function removeTrashItemRecursive(
+	node: TrashFolderNode,
+	key: string,
+): boolean {
+	const index = node.items.findIndex((item) => item.key === key);
+	if (index >= 0) {
+		node.items.splice(index, 1);
+		return true;
+	}
+
+	for (const folder of node.folders) {
+		if (removeTrashItemRecursive(folder, key)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function pruneEmptyFolders(node: TrashFolderNode): void {
+	node.folders = node.folders.filter((folder) => {
+		pruneEmptyFolders(folder);
+		return folder.folders.length > 0 || folder.items.length > 0;
+	});
+}
+
 function insertTrashItem(root: TrashFolderNode, item: TrashItem): void {
 	const segments = item.folderPath
 		? item.folderPath.split('/').filter(Boolean)
