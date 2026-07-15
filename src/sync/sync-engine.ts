@@ -52,7 +52,21 @@ export class SyncEngine {
 		const result = createSyncResult();
 
 		try {
-			if (await this.runBootstrapIfNeeded(storage, result)) {
+			const bootstrapped = await this.runBootstrapIfNeeded(storage, result);
+			if (bootstrapped) {
+				// First voyage still needs to publish local-only files; otherwise
+				// an empty cloud + empty index would loop forever without PutObject.
+				await this.pushLocalChanges(
+					this.scanLocalFiles(),
+					storage,
+					result,
+				);
+
+				if (result.errors.length === 0) {
+					this.metadataStore.database.last_sync_time = Date.now();
+				}
+
+				await this.metadataStore.save();
 				result.pendingDeletes =
 					this.metadataStore.database.pending_deletes.length;
 				return result;
@@ -98,18 +112,18 @@ export class SyncEngine {
 		}
 	}
 
+	/**
+	 * First voyage only: never completed a successful sync yet.
+	 * Do NOT use empty `files` alone — an empty cloud leaves the index empty and
+	 * would permanently skip Push.
+	 */
 	private needsBootstrap(): boolean {
-		const database = this.metadataStore.database;
-		return (
-			Object.keys(database.files).length === 0 ||
-			database.last_sync_time === 0
-		);
+		return this.metadataStore.database.last_sync_time === 0;
 	}
 
 	/**
-	 * First-run full pull: download every cloud object with conflict protection,
-	 * rebuild the local index, update last_sync_time, then end this sync cycle.
-	 * Local-only files are left for the next regular sync to push.
+	 * First-run full pull: download every cloud object with conflict protection
+	 * and rebuild the local index. Caller then pushes local-only files.
 	 */
 	private async runBootstrapIfNeeded(
 		storage: S3StorageService,
@@ -145,10 +159,6 @@ export class SyncEngine {
 					`${cloud.key} bootstrap: ${formatError(error)}`,
 				);
 			}
-		}
-
-		if (result.errors.length === 0) {
-			this.metadataStore.database.last_sync_time = Date.now();
 		}
 
 		await this.metadataStore.save();
@@ -302,9 +312,35 @@ export class SyncEngine {
 
 		const localContent = await this.vault.readBinary(localFile);
 		const localMd5 = calculateMd5(localContent).hex;
-		const cloudMd5 = etagToMd5(cloud.etag);
+		let cloudMd5 = etagToMd5(cloud.etag);
 
-		if (cloudMd5 && localMd5 === cloudMd5) {
+		// Multipart ETags are not MD5 — fetch once and hash the body.
+		if (!cloudMd5) {
+			const remoteContent = await storage.download(key);
+			cloudMd5 = calculateMd5(remoteContent).hex;
+			if (localMd5 === cloudMd5) {
+				this.metadataStore.database.files[key] = createFileRecord(
+					localFile,
+					localMd5,
+				);
+				return 'indexed';
+			}
+
+			if (!options.allowConflict) {
+				await this.writeLocalFile(key, remoteContent, cloudMd5);
+				return 'pulled';
+			}
+
+			await this.resolveConflictWithContent(
+				localFile,
+				key,
+				remoteContent,
+				cloudMd5,
+			);
+			return 'conflict';
+		}
+
+		if (localMd5 === cloudMd5) {
 			this.metadataStore.database.files[key] = createFileRecord(
 				localFile,
 				localMd5,
@@ -326,10 +362,18 @@ export class SyncEngine {
 		cloud: CloudObject,
 		storage: S3StorageService,
 	): Promise<void> {
-		const safeKey = validateVaultRelativePath(key, this.configDir);
 		const content = await storage.download(key);
 		const checksum = calculateMd5(content);
 		const cloudMd5 = etagToMd5(cloud.etag) ?? checksum.hex;
+		await this.writeLocalFile(key, content, cloudMd5);
+	}
+
+	private async writeLocalFile(
+		key: string,
+		content: ArrayBuffer,
+		md5: string,
+	): Promise<void> {
+		const safeKey = validateVaultRelativePath(key, this.configDir);
 		const existing = this.vault.getAbstractFileByPath(safeKey);
 
 		if (existing instanceof TFile) {
@@ -346,7 +390,7 @@ export class SyncEngine {
 
 		this.metadataStore.database.files[safeKey] = createFileRecord(
 			savedFile,
-			cloudMd5,
+			md5,
 		);
 	}
 
@@ -355,6 +399,23 @@ export class SyncEngine {
 		key: string,
 		cloud: CloudObject,
 		storage: S3StorageService,
+	): Promise<void> {
+		const content = await storage.download(key);
+		const checksum = calculateMd5(content);
+		const cloudMd5 = etagToMd5(cloud.etag) ?? checksum.hex;
+		await this.resolveConflictWithContent(
+			localFile,
+			key,
+			content,
+			cloudMd5,
+		);
+	}
+
+	private async resolveConflictWithContent(
+		localFile: TFile,
+		key: string,
+		cloudContent: ArrayBuffer,
+		cloudMd5: string,
 	): Promise<void> {
 		const conflictAt = new Date();
 		const conflictPath = createConflictPath(key, conflictAt);
@@ -374,7 +435,7 @@ export class SyncEngine {
 		);
 		delete this.metadataStore.database.files[key];
 
-		await this.downloadCloudFile(key, cloud, storage);
+		await this.writeLocalFile(key, cloudContent, cloudMd5);
 	}
 
 	private async reconcileDeleteQueue(
