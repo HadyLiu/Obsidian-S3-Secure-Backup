@@ -2,6 +2,7 @@ import { ItemView, Notice, Setting, type WorkspaceLeaf } from 'obsidian';
 import type { BackupExportService, BackupPackage } from '../services/backup-export-service';
 import type { TrashService } from '../services/trash-service';
 import type { TrashFolderNode, TrashItem } from '../services/trash-tree';
+import { removeTrashItemByKey } from '../services/trash-tree';
 import type { S3BackupSettings } from '../settings';
 import { MANAGER_VIEW_TYPE } from './constants';
 
@@ -180,18 +181,48 @@ export class BackupManagerView extends ItemView {
 	}
 
 	private async restoreItem(item: TrashItem): Promise<void> {
+		if (this.loading) {
+			return;
+		}
+
+		this.loading = true;
+		this.statusText = `Restoring ${item.name}...`;
+		this.render();
+
 		try {
-			this.statusText = `Restoring ${item.name}...`;
-			this.render();
 			const restoredPath = await this.trashService.restoreItem(item);
+
+			// Instant UI feedback: drop from in-memory trash tree, then re-render.
+			if (this.trashRoot) {
+				removeTrashItemByKey(this.trashRoot, item.key);
+			}
+			this.statusText = `Restored to ${restoredPath}`;
 			new Notice(`Restored to ${restoredPath}`);
-			await this.refreshData();
+			this.render();
+
+			// Soft refresh backup packages in background; trash list already updated.
+			void this.refreshBackupPackagesOnly();
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : 'Restore failed.';
 			this.statusText = message;
-			new Notice(`Restore failed: ${message}`, 8000);
+			new Notice(`Restore failed: ${message}`, 10000);
 			this.render();
+		} finally {
+			this.loading = false;
+			this.render();
+		}
+	}
+
+	private async refreshBackupPackagesOnly(): Promise<void> {
+		if (!this.hasConnectionSettings()) {
+			return;
+		}
+		try {
+			this.packages = await this.backupExportService.listRecentPackages(7);
+			this.render();
+		} catch (error) {
+			console.error('S3 backup package refresh failed:', error);
 		}
 	}
 
