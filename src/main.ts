@@ -292,7 +292,8 @@ function formatBackupResult(result: BackupResult): string {
 function formatSyncResult(result: SyncResult): string {
 	if (result.bootstrap) {
 		const bootstrapSummary =
-			`S3 bootstrap complete: ${result.pulled} file(s) downloaded.`;
+			`S3 bootstrap complete: ${result.pulled} downloaded, ` +
+			`${result.uploaded} uploaded, ${result.conflicts} conflict(s).`;
 		if (result.errors.length === 0) {
 			return bootstrapSummary;
 		}
