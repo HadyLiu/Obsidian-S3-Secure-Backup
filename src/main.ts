@@ -1,6 +1,8 @@
-import { Notice, Plugin } from 'obsidian';
+import { Notice, Plugin, type WorkspaceLeaf } from 'obsidian';
 import { BackupEngine, type BackupResult } from './backup/backup-engine';
 import { MetadataStore } from './database/metadata-store';
+import { BackupExportService } from './services/backup-export-service';
+import { TrashService } from './services/trash-service';
 import {
 	DEFAULT_BACKUP_EXPORT_PATH,
 	DEFAULT_SETTINGS,
@@ -8,6 +10,8 @@ import {
 	type S3BackupSettings,
 } from './settings';
 import { SyncEngine, type SyncResult } from './sync/sync-engine';
+import { MANAGER_VIEW_TYPE } from './ui/constants';
+import { BackupManagerView } from './ui/manager-view';
 import { S3BackupSettingTab } from './ui/settings-tab';
 
 export default class S3SecureBackupPlugin extends Plugin {
@@ -15,6 +19,8 @@ export default class S3SecureBackupPlugin extends Plugin {
 	private metadataStore!: MetadataStore;
 	private syncEngine!: SyncEngine;
 	private backupEngine!: BackupEngine;
+	private trashService!: TrashService;
+	private backupExportService!: BackupExportService;
 	private syncIntervalId: number | null = null;
 	private scheduledIntervalSeconds = 0;
 
@@ -38,6 +44,17 @@ export default class S3SecureBackupPlugin extends Plugin {
 			this.metadataStore,
 			() => this.settings,
 		);
+		this.trashService = new TrashService(this.app.vault, () => this.settings);
+		this.backupExportService = new BackupExportService(
+			this.app.vault,
+			() => this.settings,
+		);
+
+		this.registerView(MANAGER_VIEW_TYPE, (leaf) => this.createManagerView(leaf));
+
+		this.addRibbonIcon('cloud', 'S3 secure backup', () => {
+			void this.runRibbonSync();
+		});
 
 		this.addSettingTab(new S3BackupSettingTab(this.app, this));
 		this.addCommand({
@@ -52,6 +69,13 @@ export default class S3SecureBackupPlugin extends Plugin {
 			name: 'Run daily diff backup now',
 			callback: () => {
 				void this.runManualDailyBackup();
+			},
+		});
+		this.addCommand({
+			id: 'open-manager',
+			name: 'Open trash & backup manager',
+			callback: () => {
+				void this.activateManagerView();
 			},
 		});
 
@@ -77,6 +101,50 @@ export default class S3SecureBackupPlugin extends Plugin {
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 		this.refreshSyncTimer();
+	}
+
+	private createManagerView(leaf: WorkspaceLeaf): BackupManagerView {
+		const view = new BackupManagerView(leaf);
+		view.bindServices({
+			trashService: this.trashService,
+			backupExportService: this.backupExportService,
+			getSettings: () => this.settings,
+			hasConnectionSettings: () =>
+				hasCompleteConnectionSettings(this.settings),
+		});
+		return view;
+	}
+
+	private async activateManagerView(): Promise<WorkspaceLeaf | null> {
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(MANAGER_VIEW_TYPE)[0];
+		if (existing) {
+			await workspace.revealLeaf(existing);
+			return existing;
+		}
+
+		const leaf = workspace.getRightLeaf(false);
+		if (!leaf) {
+			return null;
+		}
+		await leaf.setViewState({
+			type: MANAGER_VIEW_TYPE,
+			active: true,
+		});
+		await workspace.revealLeaf(leaf);
+		return leaf;
+	}
+
+	private async refreshManagerView(): Promise<void> {
+		const leaves = this.app.workspace.getLeavesOfType(MANAGER_VIEW_TYPE);
+		await Promise.all(
+			leaves.map(async (leaf) => {
+				const view = leaf.view;
+				if (view instanceof BackupManagerView) {
+					await view.refreshData();
+				}
+			}),
+		);
 	}
 
 	private refreshSyncTimer(): void {
@@ -111,6 +179,12 @@ export default class S3SecureBackupPlugin extends Plugin {
 		await this.runDailyBackupIfDue();
 	}
 
+	private async runRibbonSync(): Promise<void> {
+		await this.activateManagerView();
+		await this.runManualSync();
+		await this.refreshManagerView();
+	}
+
 	private async runManualDailyBackup(): Promise<void> {
 		try {
 			const result = await this.backupEngine.run();
@@ -121,6 +195,7 @@ export default class S3SecureBackupPlugin extends Plugin {
 				formatBackupResult(result),
 				result.errors.length > 0 ? 12000 : 5000,
 			);
+			await this.refreshManagerView();
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : 'Unknown backup error.';
@@ -143,6 +218,7 @@ export default class S3SecureBackupPlugin extends Plugin {
 				console.error('S3 daily backup completed with errors:', result.errors);
 				return;
 			}
+			await this.refreshManagerView();
 		} catch (error) {
 			console.error('S3 daily backup failed:', error);
 		}
@@ -158,6 +234,7 @@ export default class S3SecureBackupPlugin extends Plugin {
 				formatSyncResult(result),
 				result.errors.length > 0 ? 12000 : 5000,
 			);
+			await this.refreshManagerView();
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : 'Unknown sync error.';
