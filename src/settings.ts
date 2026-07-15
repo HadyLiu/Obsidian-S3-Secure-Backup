@@ -30,22 +30,21 @@ const CLIPBOARD_CONFIG_KEYS = new Set([
 	'syncIntervalSeconds',
 ]);
 
+const CLIPBOARD_CONFIG_REGEX =
+	/(endpoint|region|bucket|accessKeyId|secretAccessKey|syncIntervalSeconds)=['"]?(.*?)['"]?(&|$)/g;
+
 export function parseClipboardConfig(
 	text: string,
 ): Partial<S3BackupSettings> {
 	const result: Partial<S3BackupSettings> = {};
-	for (const pair of text.split('&')) {
-		const separatorIndex = pair.indexOf('=');
-		if (separatorIndex < 1) {
-			continue;
-		}
 
-		const key = pair.slice(0, separatorIndex).trim();
+	for (const match of text.matchAll(CLIPBOARD_CONFIG_REGEX)) {
+		const key = match[1];
 		if (!key || !CLIPBOARD_CONFIG_KEYS.has(key)) {
 			continue;
 		}
-		const encodedValue = pair.slice(separatorIndex + 1).trim();
-		const rawValue = decodeClipboardValue(encodedValue);
+
+		const rawValue = decodeClipboardValue(match[2] ?? '');
 
 		if (key === 'syncIntervalSeconds') {
 			const parsed = Number.parseInt(rawValue, 10);
@@ -66,15 +65,16 @@ export function parseClipboardConfig(
 }
 
 export function formatClipboardConfig(settings: S3BackupSettings): string {
-	const pairs = [
+	const pairs: Array<[keyof S3BackupSettings, string]> = [
 		['endpoint', settings.endpoint],
 		['region', settings.region],
 		['bucket', settings.bucket],
 		['accessKeyId', settings.accessKeyId],
+		['secretAccessKey', settings.secretAccessKey],
 		['syncIntervalSeconds', String(settings.syncIntervalSeconds)],
 	];
 	return pairs
-		.map(([key, value]) => `${key}=${encodeURIComponent(value ?? '')}`)
+		.map(([key, value]) => `${key}='${escapeClipboardValue(value ?? '')}'`)
 		.join('&');
 }
 
@@ -86,14 +86,15 @@ export function clampSyncInterval(seconds: number): number {
 }
 
 function decodeClipboardValue(value: string): string {
+	const trimmed = value.trim();
 	const unquoted =
-		(value.startsWith("'") && value.endsWith("'")) ||
-		(value.startsWith('"') && value.endsWith('"'))
-			? value.slice(1, -1)
-			: value;
-	try {
-		return decodeURIComponent(unquoted).trim();
-	} catch {
-		return unquoted.trim();
-	}
+		(trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+		(trimmed.startsWith('"') && trimmed.endsWith('"'))
+			? trimmed.slice(1, -1)
+			: trimmed;
+	return unquoted.trim();
+}
+
+function escapeClipboardValue(value: string): string {
+	return value.replace(/'/g, "\\'");
 }

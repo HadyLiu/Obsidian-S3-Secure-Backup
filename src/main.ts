@@ -290,6 +290,15 @@ function formatBackupResult(result: BackupResult): string {
 }
 
 function formatSyncResult(result: SyncResult): string {
+	if (result.bootstrap) {
+		const bootstrapSummary =
+			`S3 bootstrap complete: ${result.pulled} file(s) downloaded.`;
+		if (result.errors.length === 0) {
+			return bootstrapSummary;
+		}
+		return `${bootstrapSummary} ${result.errors.length} error(s).`;
+	}
+
 	const summary =
 		`S3 sync complete: ${result.pulled} pulled, ` +
 		`${result.uploaded} uploaded, ${result.conflicts} conflict(s), ` +
