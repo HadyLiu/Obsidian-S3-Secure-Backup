@@ -26,3 +26,85 @@
 	border-radius: 4px;
 	font-family: var(--font-monospace);
 }
+
+.s3-backup-manager {
+	padding: 12px;
+}
+
+.s3-backup-manager__header h4 {
+	margin-top: 0;
+}
+
+.s3-backup-manager__status {
+	margin: 0.5em 0 1em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	word-break: break-word;
+}
+
+.s3-backup-manager__section {
+	margin-bottom: 1.5em;
+	padding-bottom: 1em;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.s3-backup-manager__section h5 {
+	margin: 0 0 0.75em;
+}
+
+.s3-backup-manager__empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.s3-backup-manager__tree {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+.s3-backup-manager__folder {
+	margin: 0.25em 0;
+	color: var(--text-muted);
+	white-space: pre;
+}
+
+.s3-backup-manager__item {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	margin: 0.35em 0;
+	flex-wrap: wrap;
+}
+
+.s3-backup-manager__item-name {
+	white-space: pre;
+	flex: 1 1 auto;
+	min-width: 8em;
+}
+
+.s3-backup-manager__item-path {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+.s3-backup-manager__restore {
+	margin-left: auto;
+}
+
+.s3-backup-manager__backup-row {
+	margin: 0.4em 0;
+}
+
+.s3-backup-manager__backup-row label {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+}
+
+.s3-backup-manager__progress {
+	margin: 0.75em 0;
+}
+
+.s3-backup-manager__progress progress {
+	width: 100%;
+}
