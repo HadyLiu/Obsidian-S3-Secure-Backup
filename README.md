@@ -1,119 +1,173 @@
-# S3 Secure Backup
 
-Bidirectional synchronization between an Obsidian vault and S3-compatible
-storage, with a cloud trash area and daily differential recovery packages.
+```markdown
+# Obsidian S3 Secure Backup
 
-## Security and privacy
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Obsidian Community](https://img.shields.io/badge/Obsidian-Community%20Plugin-purple.svg)](https://obsidian.md/plugins)
+[![Maintenance](https://img.shields.io/badge/Maintained%3F-Critical%20Bugs%20Only-red.svg)](#-maintenance-notice)
 
-- Vault files are sent only to the S3 endpoint configured by the user.
-- This plugin does **not** provide client-side encryption. Configure encryption
-  at rest on the storage provider when required.
-- Obsidian stores plugin settings, including the S3 secret key, as plain text in
-  `.obsidian/plugins/Obsidian-S3-Secure-Backup/data.json`.
-- Use a dedicated least-privilege S3 credential. Never reuse an account-wide
-  credential, and rotate it immediately if the settings file is exposed.
-- Keep `.obsidian/plugins/*/data.json` out of Git and other untrusted sync
-  systems. This repository's `.gitignore` already excludes its local copy.
-- Copying settings to the clipboard intentionally excludes the secret key.
-- Only HTTPS S3 endpoints are accepted. Cloud object paths cannot write into
-  `.obsidian`, traverse directories, or escape a selected export folder.
-- A remote deletion moves the corresponding unchanged local file through
-  Obsidian's configured trash behavior instead of deleting it directly.
-
-The S3 provider receives the vault paths and file contents needed for sync.
-The plugin includes no telemetry, analytics, or unrelated network requests.
+`Obsidian-S3-Secure-Backup` is an industrial-grade, bidirectional incremental synchronization and secure backup plugin designed for Obsidian. It seamlessly syncs your Obsidian vault with any S3-compatible cloud storage (e.g., Cloudflare R2, AWS S3, Backblaze B2) and implements a robust dual-track recovery protection mechanism.
 
 ---
 
-# Upstream sample development notes
+## 🚨 CRITICAL: Data Safety & Backup Warning
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+> **Your data is invaluable!**
+> Before configuring any sync/backup plugin, **always make a manual local backup of your entire Obsidian vault (compress it as a .zip file and save it somewhere safe).**
+> * **Never** debug or test a brand new sync mechanism on an active production vault without a prior backup.
+> * While this plugin features strict conflict handling and transaction safeguards, any configuration mistake (e.g., S3 permission errors, out-of-sync system clocks, bucket path mistakes) can lead to unexpected data overwrites.
+> * **Highly Recommended**: Set up a small, temporary Test Vault first to familiarize yourself with the sync and recovery flow.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+---
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
+## ⚠️ Maintenance Notice
 
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and outputs a Notice on click.
-- Registers a global interval which logs 'setInterval' to the console.
+> **Note**
+> This project is currently in **Critical-Bugs-Only maintenance** mode.
+> * **Not Accepted**: New feature requests, general support, or setup Q&As.
+> * **Accepted**: Critical bugs leading to client crashes, data loss, or major security issues.
+> * This project is provided "AS-IS". You are welcome to fork and adapt it for your own needs.
 
-## First time developing plugins?
+---
 
-Quick starting guide for new plugin devs:
+## ✨ Features
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `src/main.ts` to `main.js`.
-- Make changes to `src/main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+* 🔄 **Bidirectional Incremental Sync**: Intelligently identifies modifications, additions, and deletions across devices. Only transfers changed bytes instead of blind full-force overrides.
+* 🚀 **Bootstrap/First-run Automation**: On a clean device installation, the plugin automatically detects empty local index structures and pulls cloud data down to rebuild the indexing database seamlessly.
+* 🛑 **Copy-then-Delete Transaction Safeguard**: When performing a deletion locally, the plugin copies the file to a temporary trash folder (`.wastePaper/`) on the remote bucket first. Only upon receiving a successful 200 OK response from the S3 API will the local index and the original file be permanently pruned, avoiding any broken network deletion disasters.
+* 🛡️ **Dual-Track Recovery Protection**:
+  * **Real-time Trash Bin Explorer (`.wastePaper/`)**: Allows users to recover mistakenly deleted documents directly from the sidebar.
+  * **Differential Daily Archives (`.Backup/`)**: Triggers an automated incremental backup of all files modified over the past 24 hours every day on start, maintaining folder hierarchies.
+* 📦 **Zero Local-Compute Lifecycle Management**: Offloads physical object cleaning to S3/R2 server-side lifecycle rules to save crucial battery power and resources on mobile/desktop devices.
 
-## Releasing new releases
+---
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+## 🔒 Security and Privacy
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+* **Vault File Routing**: Vault files are sent only to the HTTPS S3 endpoint configured by the user. There is no telemetry, analytics, or unrelated network traffic.
+* **Client-Side Encryption**: This plugin does **not** provide client-side encryption. Please configure encryption-at-rest directly on your storage provider when required.
+* **Plain Text Secret Key Warning**: Obsidian stores plugin configurations (including your S3 `secretAccessKey`) as plain text in `.obsidian/plugins/Obsidian-S3-Secure-Backup/data.json`.
+* **Least Privilege Principle**: Always use a dedicated, least-privilege S3 credential. Do not reuse account-wide administrator keys. Rotate credentials immediately if your data folder is exposed.
+* **Prevent Git Exposure**: Ensure `.obsidian/plugins/*/data.json` is kept out of Git. **Add the following to your root `.gitignore` file immediately**:
+  ```text
+  .obsidian/plugins/*/data.json
 
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v18 (`node --version`).
-- `npm i` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code.
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-	"fundingUrl": "https://buymeacoffee.com"
-}
 ```
 
-If you have multiple URLs, you can also do:
+* **Clipboard Security**: Copying settings to the clipboard intentionally strips out the `secretAccessKey` to prevent accidental credential leakage.
+* **Local Deletion Buffer**: When a remote deletion is synced back to the local device, the plugin routes the file through Obsidian's native trash behavior rather than forcefully performing a physical delete.
 
-```json
-{
-	"fundingUrl": {
-		"Buy Me a Coffee": "https://buymeacoffee.com",
-		"GitHub Sponsor": "https://github.com/sponsors",
-		"Patreon": "https://www.patreon.com/"
-	}
-}
+---
+
+## ⚙️ Quick Start
+
+### 1. Manual Installation
+
+1. Back up your vault manually before installing.
+2. Download `main.js`, `manifest.json`, and `styles.css` from the latest [Release](https://www.google.com/search?q=https://github.com/your-username/obsidian-s3-secure-backup/releases).
+3. Create a folder inside your vault: `.obsidian/plugins/obsidian-s3-secure-backup/`.
+4. Drop all three files in, and activate the plugin in Obsidian's Community Plugins settings panel.
+
+### 2. S3/R2 Lifecycle Setup Guide (Mandatory)
+
+To leverage the trash and recovery engine without inflating your storage quota indefinitely, **you must configure** the following three lifecycle rules in your object storage console (e.g., Cloudflare R2 / AWS S3):
+
+| Rule Name | Matching Prefix | Action | Expiration (Days) | Purpose |
+| --- | --- | --- | --- | --- |
+| **Prune Trash** | `.wastePaper/` | Expire Object | 30 Days | Recoverable files buffer zone |
+| **Prune Audited Recovery** | `.pickUpPaper/` | Expire Object | 15 Days | Auditing for recovered files |
+| **Prune Backups** | `.Backup/` | Expire Object | 7 Days | Incremental daily restore points |
+
+*Note: Object storage platforms typically run lifecycle cleanups asynchronously at around UTC 00:00, introducing a physical deletion delay of up to 24–48 hours.*
+
+---
+
+## 🛠️ Sync Workflow Diagram
+
+```text
+               [ Sync Triggered (20s+ Interval) ]
+                              │
+                ┌─────────────┴─────────────┐
+         [ Check Local .Database ]    [ Is files empty / last_sync_time === 0 ]
+                │                                       │
+                ├─► Yes (Bootstrap Run) ────────────────┼─► 1. ListObjectsV2 (excl. prefixes)
+                │                                       │   2. GetObject & Write Locally
+                │                                       │   3. Build local .Database
+                │
+                └─► No (Standard Daily Sync)
+                            │
+             ┌──────────────┴──────────────┐
+      【Phase 1: Pull & Diff】       【Phase 2: Push & Delete】
+       - Cloud modified / Local ok:   - Local new / modified:
+         GetObject & overwrite.         PutObject + MD5 validation.
+       - Cloud modified / Local modified: - Local deleted:
+         Rename conflict, then download.Copy-then-Delete chain:
+       - Cloud deleted / Local ok:      Copy remote to trash, then
+         Delete local via native trash. execute DeleteObject.
+
 ```
 
-## API Documentation
+---
 
-See https://docs.obsidian.md
+## 💻 Developer Guide
+
+For developers who want to compile, modify, or audit the source code.
+
+### Prerequisite
+
+* NodeJS (v18 or higher is recommended)
+
+### How to Build
+
+1. Clone your repository locally (ideally directly inside a test vault's `.obsidian/plugins/obsidian-s3-secure-backup` folder).
+2. Install dependencies:
+```bash
+npm install
+
+```
+
+
+3. Start compilation in watch mode (for real-time development):
+```bash
+npm run dev
+
+```
+
+
+4. Build the production assets:
+```bash
+npm run build
+
+```
+
+
+
+### Code Quality (ESLint)
+
+This project is configured with custom ESLint rules optimized for Obsidian. Run a check with:
+
+```bash
+npm run lint
+
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the **[MIT License](https://www.google.com/search?q=LICENSE)**.
+
+```text
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+```
+
+```
+
+```
