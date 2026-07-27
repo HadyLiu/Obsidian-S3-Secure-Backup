@@ -245,13 +245,27 @@ export default class S3SecureBackupPlugin extends Plugin {
 		}
 	}
 
+	private logSyncWarnings(result: SyncResult): void {
+		if (result.warnings.length === 0) {
+			return;
+		}
+
+		console.warn(
+			`S3 sync reported ${result.warnings.length} warning(s):`,
+		);
+		for (const warning of result.warnings) {
+			console.warn(`  ${warning}`);
+		}
+	}
+
 	private async runManualSync(): Promise<void> {
 		try {
 			const result = await this.syncEngine.sync();
+			this.logSyncWarnings(result);
 			this.logSyncErrors(result);
 			new Notice(
 				formatSyncResult(result),
-				result.errors.length > 0 ? 12000 : 5000,
+				hasSyncAlerts(result) ? 12000 : 5000,
 			);
 			await this.refreshManagerView();
 		} catch (error) {
@@ -267,6 +281,7 @@ export default class S3SecureBackupPlugin extends Plugin {
 
 		try {
 			const result = await this.syncEngine.sync();
+			this.logSyncWarnings(result);
 			this.logSyncErrors(result);
 		} catch (error) {
 			console.error('S3 background backup failed.', error);
@@ -295,29 +310,55 @@ function formatBackupResult(result: BackupResult): string {
 }
 
 function formatSyncResult(result: SyncResult): string {
+	const warningSuffix =
+		result.warnings.length > 0 ? ` ${formatSyncWarnings(result.warnings)}` : '';
+
 	if (result.bootstrap) {
 		const bootstrapSummary =
 			`S3 bootstrap complete: ${result.pulled} downloaded, ` +
-			`${result.uploaded} uploaded, ${result.conflicts} conflict(s).`;
+			`${result.uploaded} uploaded, ${result.conflicts} conflict(s)` +
+			(result.pathCollisions > 0
+				? `, ${result.pathCollisions} path collision(s) skipped`
+				: '') +
+			'.';
 		if (result.errors.length === 0) {
-			return bootstrapSummary;
+			return `${bootstrapSummary}${warningSuffix}`;
 		}
-		return `${bootstrapSummary} ${formatSyncErrors(result.errors)}`;
+		return `${bootstrapSummary} ${formatSyncErrors(result.errors)}${warningSuffix}`;
 	}
 
 	const summary =
 		`S3 sync complete: ${result.pulled} pulled, ` +
 		`${result.uploaded} uploaded, ${result.conflicts} conflict(s), ` +
 		`${result.localDeleted} local deleted, ${result.deleted} remote deleted, ` +
-		`${result.skipped} unchanged.`;
+		`${result.skipped} unchanged` +
+		(result.pathCollisions > 0
+			? `, ${result.pathCollisions} path collision(s) skipped`
+			: '') +
+		'.';
 	if (result.errors.length === 0) {
-		return summary;
+		return `${summary}${warningSuffix}`;
 	}
 
 	return (
 		`${summary} ${formatSyncErrors(result.errors)}; ` +
-		`${result.pendingDeletes} deletion(s) pending retry.`
+		`${result.pendingDeletes} deletion(s) pending retry.${warningSuffix}`
 	);
+}
+
+function formatSyncWarnings(warnings: string[]): string {
+	if (warnings.length === 1) {
+		return `Warning: ${warnings[0]}`;
+	}
+
+	const preview = warnings.slice(0, 1).join('; ');
+	const suffix =
+		warnings.length > 1 ? ` (+${warnings.length - 1} more in console)` : '';
+	return `Warnings: ${preview}${suffix}`;
+}
+
+function hasSyncAlerts(result: SyncResult): boolean {
+	return result.errors.length > 0 || result.warnings.length > 0;
 }
 
 function formatSyncErrors(errors: string[]): string {

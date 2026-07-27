@@ -12,6 +12,11 @@ import { calculateMd5 } from './checksum';
 import { etagToMd5 } from './etag';
 import { createConflictPath, createWasteKey } from './paths';
 import {
+	detectSanitizedPathCollisions,
+	WindowsPathCollisionError,
+	WindowsPathCollisionTracker,
+} from './path-collision-tracker';
+import {
 	ensureParentFolders,
 	resolveVaultFile,
 	toLocalVaultPath,
@@ -22,17 +27,20 @@ export interface SyncResult {
 	bootstrap: boolean;
 	pulled: number;
 	conflicts: number;
+	pathCollisions: number;
 	localDeleted: number;
 	uploaded: number;
 	metadataUpdated: number;
 	deleted: number;
 	skipped: number;
 	pendingDeletes: number;
+	warnings: string[];
 	errors: string[];
 }
 
 export class SyncEngine {
 	private running = false;
+	private pathCollisionTracker: WindowsPathCollisionTracker | null = null;
 
 	constructor(
 		private readonly app: App,
@@ -56,10 +64,14 @@ export class SyncEngine {
 		this.running = true;
 		const storage = new S3StorageService(settings);
 		const result = createSyncResult();
+		this.pathCollisionTracker = new WindowsPathCollisionTracker(
+			this.metadataStore.database.files,
+		);
 
 		try {
 			const bootstrapped = await this.runBootstrapIfNeeded(storage, result);
 			if (bootstrapped) {
+				this.mergePathCollisionWarnings(result);
 				// First voyage still needs to publish local-only files; otherwise
 				// an empty cloud + empty index would loop forever without PutObject.
 				await this.pushLocalChanges(
@@ -80,6 +92,10 @@ export class SyncEngine {
 
 			const localFiles = this.scanLocalFiles();
 			const cloudObjects = await storage.listVaultObjects();
+			this.scanCloudPathCollisions(
+				cloudObjects.map((object) => object.key),
+				result,
+			);
 			const cloudIndex = new Map(
 				cloudObjects.map((object) => [object.key, object]),
 			);
@@ -113,9 +129,52 @@ export class SyncEngine {
 				this.metadataStore.database.pending_deletes.length;
 			return result;
 		} finally {
+			this.pathCollisionTracker = null;
 			storage.destroy();
 			this.running = false;
 		}
+	}
+
+	private scanCloudPathCollisions(
+		cloudKeys: string[],
+		result: SyncResult,
+	): void {
+		if (!this.pathCollisionTracker) {
+			return;
+		}
+
+		this.pathCollisionTracker.reportBatchCollisions(
+			detectSanitizedPathCollisions(cloudKeys),
+		);
+		this.mergePathCollisionWarnings(result);
+	}
+
+	private mergePathCollisionWarnings(result: SyncResult): void {
+		if (!this.pathCollisionTracker) {
+			return;
+		}
+
+		for (const warning of this.pathCollisionTracker.warnings) {
+			if (!result.warnings.includes(warning)) {
+				result.warnings.push(warning);
+			}
+		}
+	}
+
+	private handleSyncError(
+		error: unknown,
+		context: string,
+		result: SyncResult,
+	): void {
+		if (error instanceof WindowsPathCollisionError) {
+			result.pathCollisions += 1;
+			if (!result.warnings.includes(error.message)) {
+				result.warnings.push(error.message);
+			}
+			return;
+		}
+
+		result.errors.push(`${context}: ${formatError(error)}`);
 	}
 
 	/**
@@ -141,9 +200,18 @@ export class SyncEngine {
 
 		result.bootstrap = true;
 		const cloudObjects = await storage.listVaultObjects();
+		this.scanCloudPathCollisions(
+			cloudObjects.map((object) => object.key),
+			result,
+		);
 		const localFiles = this.scanLocalFiles();
 
 		for (const cloud of cloudObjects) {
+			if (this.pathCollisionTracker?.isCloudKeyBlocked(cloud.key)) {
+				result.pathCollisions += 1;
+				continue;
+			}
+
 			try {
 				validateVaultRelativePath(cloud.key, this.configDir);
 				const localPath = toLocalVaultPath(cloud.key);
@@ -162,9 +230,7 @@ export class SyncEngine {
 					result.skipped += 1;
 				}
 			} catch (error) {
-				result.errors.push(
-					`${cloud.key} bootstrap: ${formatError(error)}`,
-				);
+				this.handleSyncError(error, `${cloud.key} bootstrap`, result);
 			}
 		}
 
@@ -201,6 +267,11 @@ export class SyncEngine {
 		for (const [key, cloud] of cloudIndex) {
 			// Local delete is in-flight: never resurrect the object from cloud.
 			if (pendingPaths.has(key)) {
+				continue;
+			}
+
+			if (this.pathCollisionTracker?.isCloudKeyBlocked(key)) {
+				result.pathCollisions += 1;
 				continue;
 			}
 
@@ -263,7 +334,7 @@ export class SyncEngine {
 				await this.downloadCloudFile(key, cloud, storage);
 				result.pulled += 1;
 			} catch (error) {
-				result.errors.push(`${key} pull: ${formatError(error)}`);
+				this.handleSyncError(error, `${key} pull`, result);
 			}
 		}
 
@@ -383,6 +454,7 @@ export class SyncEngine {
 	): Promise<void> {
 		const safeCloudKey = validateVaultRelativePath(cloudKey, this.configDir);
 		const localPath = toLocalVaultPath(safeCloudKey);
+		this.pathCollisionTracker?.assertWritable(safeCloudKey, localPath);
 		const savedFile = await writeVaultBinary(
 			this.vault,
 			localPath,
@@ -617,12 +689,14 @@ function createSyncResult(): SyncResult {
 		bootstrap: false,
 		pulled: 0,
 		conflicts: 0,
+		pathCollisions: 0,
 		localDeleted: 0,
 		uploaded: 0,
 		metadataUpdated: 0,
 		deleted: 0,
 		skipped: 0,
 		pendingDeletes: 0,
+		warnings: [],
 		errors: [],
 	};
 }
