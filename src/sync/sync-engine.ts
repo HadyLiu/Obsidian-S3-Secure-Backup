@@ -1,4 +1,4 @@
-import { type App, TFile, type Vault } from 'obsidian';
+import { type App, Platform, TFile, type Vault } from 'obsidian';
 import type { FileRecord, MetadataStore } from '../database/metadata-store';
 import {
 	validateS3Endpoint,
@@ -11,6 +11,12 @@ import { S3StorageService } from '../s3/storage-service';
 import { calculateMd5 } from './checksum';
 import { etagToMd5 } from './etag';
 import { createConflictPath, createWasteKey } from './paths';
+import {
+	ensureParentFolders,
+	resolveVaultFile,
+	toLocalVaultPath,
+	writeVaultBinary,
+} from './vault-paths';
 
 export interface SyncResult {
 	bootstrap: boolean;
@@ -140,10 +146,11 @@ export class SyncEngine {
 		for (const cloud of cloudObjects) {
 			try {
 				validateVaultRelativePath(cloud.key, this.configDir);
+				const localPath = toLocalVaultPath(cloud.key);
 				const outcome = await this.applyCloudObject(
 					cloud.key,
 					cloud,
-					localFiles.get(cloud.key),
+					localFiles.get(localPath),
 					storage,
 					{ allowConflict: true },
 				);
@@ -200,7 +207,8 @@ export class SyncEngine {
 			try {
 				validateVaultRelativePath(key, this.configDir);
 				const record = database.files[key];
-				const localFile = localFiles.get(key);
+				const localPath = record?.path ?? toLocalVaultPath(key);
+				const localFile = localFiles.get(localPath);
 
 				if (!record) {
 					const outcome = await this.applyCloudObject(
@@ -259,28 +267,28 @@ export class SyncEngine {
 			}
 		}
 
-		for (const path of Object.keys(database.files)) {
-			if (cloudIndex.has(path) || pendingPaths.has(path)) {
+		for (const cloudKey of Object.keys(database.files)) {
+			if (cloudIndex.has(cloudKey) || pendingPaths.has(cloudKey)) {
 				continue;
 			}
 
-			const record = database.files[path];
+			const record = database.files[cloudKey];
 			if (!record) {
 				continue;
 			}
 
-			const localFile = localFiles.get(path);
+			const localFile = localFiles.get(record.path);
 			try {
 				if (localFile && isLocalUnchanged(localFile, record)) {
 					await this.vault.delete(localFile);
-					delete database.files[path];
+					delete database.files[cloudKey];
 					result.localDeleted += 1;
 					continue;
 				}
 
 				if (!localFile) {
 					// Already gone locally and gone on cloud — drop the stale index.
-					delete database.files[path];
+					delete database.files[cloudKey];
 					continue;
 				}
 
@@ -288,7 +296,7 @@ export class SyncEngine {
 				// re-upload it as a resurrection of the user's latest edit.
 			} catch (error) {
 				result.errors.push(
-					`${path} local delete: ${formatError(error)}`,
+					`${cloudKey} local delete: ${formatError(error)}`,
 				);
 			}
 		}
@@ -369,26 +377,19 @@ export class SyncEngine {
 	}
 
 	private async writeLocalFile(
-		key: string,
+		cloudKey: string,
 		content: ArrayBuffer,
 		md5: string,
 	): Promise<void> {
-		const safeKey = validateVaultRelativePath(key, this.configDir);
-		const existing = this.vault.getAbstractFileByPath(safeKey);
+		const safeCloudKey = validateVaultRelativePath(cloudKey, this.configDir);
+		const localPath = toLocalVaultPath(safeCloudKey);
+		const savedFile = await writeVaultBinary(
+			this.vault,
+			localPath,
+			content,
+		);
 
-		if (existing instanceof TFile) {
-			await this.vault.modifyBinary(existing, content);
-		} else {
-			await ensureParentFolders(this.vault, safeKey);
-			await this.vault.createBinary(safeKey, content);
-		}
-
-		const savedFile = this.vault.getAbstractFileByPath(safeKey);
-		if (!(savedFile instanceof TFile)) {
-			throw new Error('Failed to save downloaded file locally.');
-		}
-
-		this.metadataStore.database.files[safeKey] = createFileRecord(
+		this.metadataStore.database.files[safeCloudKey] = createFileRecord(
 			savedFile,
 			md5,
 		);
@@ -413,17 +414,17 @@ export class SyncEngine {
 
 	private async resolveConflictWithContent(
 		localFile: TFile,
-		key: string,
+		cloudKey: string,
 		cloudContent: ArrayBuffer,
 		cloudMd5: string,
 	): Promise<void> {
 		const conflictAt = new Date();
-		const conflictPath = createConflictPath(key, conflictAt);
+		const conflictPath = createConflictPath(localFile.path, conflictAt);
 		await ensureParentFolders(this.vault, conflictPath);
 		await this.app.fileManager.renameFile(localFile, conflictPath);
 
-		const conflictFile = this.vault.getAbstractFileByPath(conflictPath);
-		if (!(conflictFile instanceof TFile)) {
+		const conflictFile = resolveVaultFile(this.vault, conflictPath);
+		if (!conflictFile) {
 			throw new Error('Failed to create local conflict copy.');
 		}
 
@@ -433,9 +434,9 @@ export class SyncEngine {
 			conflictFile,
 			conflictChecksum.hex,
 		);
-		delete this.metadataStore.database.files[key];
+		delete this.metadataStore.database.files[cloudKey];
 
-		await this.writeLocalFile(key, cloudContent, cloudMd5);
+		await this.writeLocalFile(cloudKey, cloudContent, cloudMd5);
 	}
 
 	private async reconcileDeleteQueue(
@@ -444,15 +445,19 @@ export class SyncEngine {
 		const database = this.metadataStore.database;
 
 		database.pending_deletes = database.pending_deletes.filter(
-			(path) => !localFiles.has(path),
+			(cloudKey) => {
+				const record = database.files[cloudKey];
+				const localPath = record?.path ?? toLocalVaultPath(cloudKey);
+				return !localFiles.has(localPath);
+			},
 		);
 
 		const queuedPaths = new Set(database.pending_deletes);
-		for (const path of Object.keys(database.files)) {
-			if (localFiles.has(path) || queuedPaths.has(path)) {
+		for (const [cloudKey, record] of Object.entries(database.files)) {
+			if (localFiles.has(record.path) || queuedPaths.has(cloudKey)) {
 				continue;
 			}
-			database.pending_deletes.push(path);
+			database.pending_deletes.push(cloudKey);
 		}
 
 		await this.metadataStore.save();
@@ -467,17 +472,19 @@ export class SyncEngine {
 		const pendingPaths = new Set(
 			this.metadataStore.database.pending_deletes,
 		);
+		const localToCloudKey = buildLocalToCloudKeyMap(records);
 
-		for (const [path, file] of localFiles) {
-			if (pendingPaths.has(path)) {
+		for (const [localPath, file] of localFiles) {
+			const cloudKey = localToCloudKey.get(localPath) ?? localPath;
+			if (pendingPaths.has(cloudKey)) {
 				continue;
 			}
 
-			const previous = records[path];
+			const previous = records[cloudKey];
 			if (
 				previous &&
-				previous.mtime === file.stat.mtime &&
-				previous.size === file.stat.size
+				previous.size === file.stat.size &&
+				isCloseMtime(previous.mtime, file.stat.mtime)
 			) {
 				result.skipped += 1;
 				continue;
@@ -488,16 +495,16 @@ export class SyncEngine {
 				const checksum = calculateMd5(content);
 
 				if (previous?.md5 === checksum.hex) {
-					records[path] = createFileRecord(file, checksum.hex);
+					records[cloudKey] = createFileRecord(file, checksum.hex);
 					result.metadataUpdated += 1;
 					continue;
 				}
 
-				await storage.upload(path, content, checksum.base64);
-				records[path] = createFileRecord(file, checksum.hex);
+				await storage.upload(cloudKey, content, checksum.base64);
+				records[cloudKey] = createFileRecord(file, checksum.hex);
 				result.uploaded += 1;
 			} catch (error) {
-				result.errors.push(`${path} push: ${formatError(error)}`);
+				result.errors.push(`${cloudKey} push: ${formatError(error)}`);
 			}
 		}
 	}
@@ -514,63 +521,65 @@ export class SyncEngine {
 		const database = this.metadataStore.database;
 		const pendingPaths = [...database.pending_deletes];
 
-		for (const path of pendingPaths) {
-			if (this.vault.getAbstractFileByPath(path)) {
+		for (const cloudKey of pendingPaths) {
+			const record = database.files[cloudKey];
+			const localPath = record?.path ?? toLocalVaultPath(cloudKey);
+			if (this.vault.getAbstractFileByPath(localPath)) {
 				database.pending_deletes = database.pending_deletes.filter(
-					(item) => item !== path,
+					(item) => item !== cloudKey,
 				);
 				await this.metadataStore.save();
 				continue;
 			}
 
 			try {
-				const wasteKey = createWasteKey(path, new Date());
-				await storage.copyToWaste(path, wasteKey);
+				const wasteKey = createWasteKey(cloudKey, new Date());
+				await storage.copyToWaste(cloudKey, wasteKey);
 			} catch (error) {
 				if (isMissingObjectError(error)) {
-					delete database.files[path];
+					delete database.files[cloudKey];
 					database.pending_deletes = database.pending_deletes.filter(
-						(item) => item !== path,
+						(item) => item !== cloudKey,
 					);
 					result.deleted += 1;
 					await this.metadataStore.save();
 					continue;
 				}
 
-				if (!database.pending_deletes.includes(path)) {
-					database.pending_deletes.push(path);
+				if (!database.pending_deletes.includes(cloudKey)) {
+					database.pending_deletes.push(cloudKey);
 				}
 				result.errors.push(
-					`${path} delete copy: ${formatError(error)}`,
+					`${cloudKey} delete copy: ${formatError(error)}`,
 				);
 				await this.metadataStore.save();
 				return false;
 			}
 
 			try {
-				await storage.delete(path);
-				delete database.files[path];
+				await storage.delete(cloudKey);
+				delete database.files[cloudKey];
 				database.pending_deletes = database.pending_deletes.filter(
-					(item) => item !== path,
+					(item) => item !== cloudKey,
 				);
 				result.deleted += 1;
 				await this.metadataStore.save();
 			} catch (error) {
 				if (isMissingObjectError(error)) {
-					delete database.files[path];
+					delete database.files[cloudKey];
 					database.pending_deletes = database.pending_deletes.filter(
-						(item) => item !== path,
+						(item) => item !== cloudKey,
 					);
 					result.deleted += 1;
 					await this.metadataStore.save();
 					continue;
 				}
 
-				if (!database.pending_deletes.includes(path)) {
-					database.pending_deletes.push(path);
+				if (!database.pending_deletes.includes(cloudKey)) {
+					database.pending_deletes.push(cloudKey);
 				}
 				result.errors.push(
-					`${path} delete object: ${formatError(error)}`,
+					`${cloudKey} delete object: ${formatError(error)}`,
 				);
 				await this.metadataStore.save();
 				return false;
@@ -579,6 +588,16 @@ export class SyncEngine {
 
 		return true;
 	}
+}
+
+function buildLocalToCloudKeyMap(
+	files: Record<string, FileRecord>,
+): Map<string, string> {
+	const map = new Map<string, string>();
+	for (const [cloudKey, record] of Object.entries(files)) {
+		map.set(record.path, cloudKey);
+	}
+	return map;
 }
 
 function validateSettings(settings: S3BackupSettings): void {
@@ -617,15 +636,26 @@ function createFileRecord(file: TFile, md5: string): FileRecord {
 	};
 }
 
+function isCloseMtime(left: number, right: number): boolean {
+	if (left === right) {
+		return true;
+	}
+	return Platform.isWin && Math.abs(left - right) <= 1000;
+}
+
 function isLocalUnchanged(
 	localFile: TFile | undefined,
 	record: FileRecord,
 ): boolean {
-	return Boolean(
-		localFile &&
-			localFile.stat.mtime === record.mtime &&
-			localFile.stat.size === record.size,
-	);
+	if (!localFile || localFile.stat.size !== record.size) {
+		return false;
+	}
+
+	if (localFile.stat.mtime === record.mtime) {
+		return true;
+	}
+
+	return isCloseMtime(localFile.stat.mtime, record.mtime);
 }
 
 function isCloudChanged(cloud: CloudObject, record: FileRecord): boolean {
@@ -657,18 +687,6 @@ function isMissingObjectError(error: unknown): boolean {
 		return true;
 	}
 	return awsError.$metadata?.httpStatusCode === 404;
-}
-
-async function ensureParentFolders(vault: Vault, path: string): Promise<void> {
-	const parts = path.split('/').filter(Boolean);
-	parts.pop();
-	let current = '';
-	for (const part of parts) {
-		current = current ? `${current}/${part}` : part;
-		if (!vault.getAbstractFileByPath(current)) {
-			await vault.createFolder(current);
-		}
-	}
 }
 
 function formatError(error: unknown): string {

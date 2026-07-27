@@ -147,7 +147,19 @@ function normalizeFileRecords(
 		) {
 			continue;
 		}
-		files[path] = { path, mtime: record.mtime, size: record.size, md5: record.md5 };
+		const localPath =
+			typeof record.path === 'string' && record.path.length > 0
+				? record.path
+				: path;
+		if (!isSafeMetadataPath(localPath, configDir)) {
+			continue;
+		}
+		files[path] = {
+			path: localPath,
+			mtime: record.mtime,
+			size: record.size,
+			md5: record.md5,
+		};
 	}
 	return files;
 }

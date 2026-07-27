@@ -232,21 +232,30 @@ export default class S3SecureBackupPlugin extends Plugin {
 		}
 	}
 
+	private logSyncErrors(result: SyncResult): void {
+		if (result.errors.length === 0) {
+			return;
+		}
+
+		console.error(
+			`S3 sync completed with ${result.errors.length} error(s):`,
+		);
+		for (const error of result.errors) {
+			console.error(`  ${error}`);
+		}
+	}
+
 	private async runManualSync(): Promise<void> {
 		try {
 			const result = await this.syncEngine.sync();
-			if (result.errors.length > 0) {
-				console.error(
-					`S3 backup completed with ${result.errors.length} error(s).`,
-				);
-			}
+			this.logSyncErrors(result);
 			new Notice(
 				formatSyncResult(result),
 				result.errors.length > 0 ? 12000 : 5000,
 			);
 			await this.refreshManagerView();
-		} catch {
-			console.error('S3 backup failed.');
+		} catch (error) {
+			console.error('S3 backup failed.', error);
 			new Notice('S3 backup failed. Check settings and permissions.', 8000);
 		}
 	}
@@ -258,13 +267,9 @@ export default class S3SecureBackupPlugin extends Plugin {
 
 		try {
 			const result = await this.syncEngine.sync();
-			if (result.errors.length > 0) {
-				console.error(
-					`S3 backup completed with ${result.errors.length} error(s).`,
-				);
-			}
-		} catch {
-			console.error('S3 background backup failed.');
+			this.logSyncErrors(result);
+		} catch (error) {
+			console.error('S3 background backup failed.', error);
 		}
 	}
 }
@@ -297,7 +302,7 @@ function formatSyncResult(result: SyncResult): string {
 		if (result.errors.length === 0) {
 			return bootstrapSummary;
 		}
-		return `${bootstrapSummary} ${result.errors.length} error(s).`;
+		return `${bootstrapSummary} ${formatSyncErrors(result.errors)}`;
 	}
 
 	const summary =
@@ -310,7 +315,18 @@ function formatSyncResult(result: SyncResult): string {
 	}
 
 	return (
-		`${summary} ${result.errors.length} error(s); ` +
+		`${summary} ${formatSyncErrors(result.errors)}; ` +
 		`${result.pendingDeletes} deletion(s) pending retry.`
 	);
+}
+
+function formatSyncErrors(errors: string[]): string {
+	if (errors.length === 1) {
+		return `1 error: ${errors[0]}`;
+	}
+
+	const preview = errors.slice(0, 2).join('; ');
+	const suffix =
+		errors.length > 2 ? ` (+${errors.length - 2} more in console)` : '';
+	return `${errors.length} errors: ${preview}${suffix}`;
 }

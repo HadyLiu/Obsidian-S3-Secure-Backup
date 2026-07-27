@@ -86,6 +86,15 @@ export function formatS3Error(error: unknown): string {
 		parts.push(String(code));
 	}
 
+	const message = awsError.message?.trim();
+	if (
+		message &&
+		message !== 'Error' &&
+		!parts.some((part) => message.includes(part))
+	) {
+		parts.push(message);
+	}
+
 	return parts.join(' — ') || 'Request failed. See the endpoint and permissions.';
 }
 
